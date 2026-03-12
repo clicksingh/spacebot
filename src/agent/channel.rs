@@ -56,14 +56,22 @@ struct PendingResult {
 const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
 
 async fn load_persisted_message_count(pool: &sqlx::SqlitePool, channel_id: &str) -> usize {
-    sqlx::query("SELECT message_count FROM channel_message_counts WHERE channel_id = ?")
+    match sqlx::query("SELECT message_count FROM channel_message_counts WHERE channel_id = ?")
         .bind(channel_id)
         .fetch_optional(pool)
         .await
-        .ok()
-        .flatten()
-        .map(|r| r.get::<i64, _>("message_count") as usize)
-        .unwrap_or(0)
+    {
+        Ok(Some(row)) => row.get::<i64, _>("message_count") as usize,
+        Ok(None) => 0,
+        Err(error) => {
+            tracing::warn!(
+                channel_id,
+                %error,
+                "failed to load persisted channel message count; defaulting to 0"
+            );
+            0
+        }
+    }
 }
 
 async fn recv_channel_event(
@@ -1511,14 +1519,23 @@ impl Channel {
             .current_adapter()
             .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
-        let working_state_context = self
+        let working_state_context = match self
             .deps
             .working_state_store
             .get(self.id.as_ref(), 72)
             .await
-            .ok()
-            .flatten()
-            .map(|ws| ws.render());
+        {
+            Ok(Some(working_state)) => Some(working_state.render()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to load working state context; continuing without it"
+                );
+                None
+            }
+        };
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -2184,14 +2201,23 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
-        let working_state_context = self
+        let working_state_context = match self
             .deps
             .working_state_store
             .get(self.id.as_ref(), 72)
             .await
-            .ok()
-            .flatten()
-            .map(|ws| ws.render());
+        {
+            Ok(Some(working_state)) => Some(working_state.render()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to load working state context; continuing without it"
+                );
+                None
+            }
+        };
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -3076,12 +3102,11 @@ impl Channel {
             && config.message_interval > 0
             && self.message_count >= config.message_interval
         {
-            // Reset counter before spawning so subsequent messages don't pile up.
-            self.message_count = 0;
-
             match spawn_memory_persistence_branch(&self.state, &self.deps).await {
                 Ok(branch_id) => {
                     self.memory_persistence_branches.insert(branch_id);
+                    // Only clear the interval count when a branch actually starts.
+                    self.message_count = 0;
                     tracing::info!(
                         channel_id = %self.id,
                         branch_id = %branch_id,

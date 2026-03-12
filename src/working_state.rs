@@ -15,6 +15,21 @@ const MAX_NEXT_CHARS: usize = 800;
 const MAX_BLOCKERS_CHARS: usize = 800;
 const MAX_CONTEXT_CHARS: usize = 4_000;
 
+fn render_labeled_field(out: &mut String, label: &str, value: &str) {
+    let mut lines = value.lines();
+    match lines.next() {
+        Some(first_line) => {
+            out.push_str(&format!("**{label}:** {first_line}\n"));
+            for line in lines {
+                out.push_str(&format!("    {line}\n"));
+            }
+        }
+        None => {
+            out.push_str(&format!("**{label}:**\n"));
+        }
+    }
+}
+
 fn clamp_field(value: &str, max_chars: usize, field_name: &str) -> String {
     let char_count = value.chars().count();
     if char_count <= max_chars {
@@ -70,15 +85,15 @@ impl WorkingState {
     pub fn render(&self) -> String {
         let mut out = String::new();
 
-        out.push_str(&format!("**Task:** {}\n", self.task));
-        out.push_str(&format!("**Progress:** {}\n", self.progress));
-        out.push_str(&format!("**Next:** {}\n", self.next));
+        render_labeled_field(&mut out, "Task", &self.task);
+        render_labeled_field(&mut out, "Progress", &self.progress);
+        render_labeled_field(&mut out, "Next", &self.next);
 
         if let Some(ref b) = self.blockers {
-            out.push_str(&format!("**Blockers:** {}\n", b));
+            render_labeled_field(&mut out, "Blockers", b);
         }
         if let Some(ref c) = self.context {
-            out.push_str(&format!("**Context:** {}\n", c));
+            render_labeled_field(&mut out, "Context", c);
         }
 
         // Age note so the model knows how stale this is.

@@ -5,6 +5,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -21,10 +22,6 @@ impl WorkingStateSaveTool {
         }
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("working_state_save failed: {0}")]
-pub struct WorkingStateSaveError(String);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkingStateSaveArgs {
@@ -55,12 +52,14 @@ pub struct WorkingStateSaveArgs {
 #[derive(Debug, Serialize)]
 pub struct WorkingStateSaveOutput {
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl Tool for WorkingStateSaveTool {
     const NAME: &'static str = "working_state_save";
 
-    type Error = WorkingStateSaveError;
+    type Error = Infallible;
     type Args = WorkingStateSaveArgs;
     type Output = WorkingStateSaveOutput;
 
@@ -121,11 +120,22 @@ impl Tool for WorkingStateSaveTool {
             context: args.context,
         };
 
-        self.store
-            .upsert(&input)
-            .await
-            .map_err(|e| WorkingStateSaveError(format!("{e}")))?;
+        if let Err(error) = self.store.upsert(&input).await {
+            let message = format!("{error}");
+            tracing::warn!(
+                channel_id = %self.channel_id,
+                error = %message,
+                "working_state_save upsert failed"
+            );
+            return Ok(WorkingStateSaveOutput {
+                success: false,
+                error: Some(message),
+            });
+        }
 
-        Ok(WorkingStateSaveOutput { success: true })
+        Ok(WorkingStateSaveOutput {
+            success: true,
+            error: None,
+        })
     }
 }
