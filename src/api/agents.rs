@@ -427,6 +427,9 @@ pub(super) async fn trigger_warmup(
                 event_tx,
                 memory_event_tx,
                 sqlite_pool: sqlite_pool.clone(),
+                working_state_store: Arc::new(crate::working_state::WorkingStateStore::new(
+                    sqlite_pool.clone(),
+                )),
                 messaging_manager: None,
                 sandbox,
                 task_store,
@@ -776,6 +779,9 @@ pub async fn create_agent_internal(
         event_tx: event_tx.clone(),
         memory_event_tx: memory_event_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
+        working_state_store: Arc::new(crate::working_state::WorkingStateStore::new(
+            db.sqlite.clone(),
+        )),
         messaging_manager: {
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()

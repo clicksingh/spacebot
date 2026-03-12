@@ -31,6 +31,7 @@ pub mod tasks;
 pub mod telemetry;
 pub mod tools;
 pub mod update;
+pub mod working_state;
 
 pub use error::{Error, Result};
 
@@ -389,6 +390,7 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub memory_event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
+    pub working_state_store: Arc<working_state::WorkingStateStore>,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
     pub sandbox: Arc<sandbox::Sandbox>,
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,

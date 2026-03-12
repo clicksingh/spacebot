@@ -1765,7 +1765,8 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                         snapshot_store,
-                    );
+                    )
+                    .await;
                     let channel_registration_id = agent
                         .deps
                         .process_control_registry
@@ -2052,7 +2053,8 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                         snapshot_store,
-                    );
+                    )
+                    .await;
                     let channel_registration_id = agent
                         .deps
                         .process_control_registry
@@ -2718,6 +2720,9 @@ async fn initialize_agents(
             event_tx,
             memory_event_tx,
             sqlite_pool: db.sqlite.clone(),
+            working_state_store: Arc::new(spacebot::working_state::WorkingStateStore::new(
+                db.sqlite.clone(),
+            )),
             messaging_manager: None,
             sandbox,
             links: agent_links.clone(),

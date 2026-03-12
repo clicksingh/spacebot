@@ -2,6 +2,14 @@
 {{ identity_context }}
 {%- endif %}
 
+{%- if working_state_context %}
+## Active Working State
+
+This is your short-term memory for the current task. It was written by your last memory persistence run and survives restarts. If the user sends a short follow-up message with no standalone meaning - "try now", "ok", "check it", "go", "done?", "what happened", "did it work" - resume from this context rather than asking for clarification.
+
+{{ working_state_context }}
+{%- endif %}
+
 {%- if memory_bulletin %}
 ## Memory Context
 

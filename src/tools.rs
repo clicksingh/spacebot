@@ -63,6 +63,7 @@ pub mod task_list;
 pub mod task_update;
 pub mod web_search;
 pub mod worker_inspect;
+pub mod working_state_save;
 
 pub mod factory_create_agent;
 pub mod factory_list_presets;
@@ -187,6 +188,8 @@ pub enum BranchToolProfile {
     Default,
     MemoryPersistence {
         contract_state: Arc<MemoryPersistenceContractState>,
+        working_state_store: Arc<crate::working_state::WorkingStateStore>,
+        channel_id: String,
     },
 }
 
@@ -515,7 +518,7 @@ pub fn create_branch_tool_server(
         agent_id.clone(),
         memory_event_tx.clone(),
     );
-    if let BranchToolProfile::MemoryPersistence { contract_state } = &profile {
+    if let BranchToolProfile::MemoryPersistence { contract_state, .. } = &profile {
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
@@ -535,8 +538,17 @@ pub fn create_branch_tool_server(
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
 
-    if let BranchToolProfile::MemoryPersistence { contract_state } = profile {
+    if let BranchToolProfile::MemoryPersistence {
+        contract_state,
+        working_state_store,
+        channel_id,
+    } = profile
+    {
         server = server.tool(MemoryPersistenceCompleteTool::new(contract_state));
+        server = server.tool(crate::tools::working_state_save::WorkingStateSaveTool::new(
+            working_state_store,
+            channel_id,
+        ));
     }
 
     if let Some(state) = state {

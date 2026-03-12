@@ -862,7 +862,8 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         context.screenshot_dir.clone(),
         context.logs_dir.clone(),
         None, // cron channels don't capture prompt snapshots
-    );
+    )
+    .await;
 
     // Spawn the channel's event loop
     let channel_handle = tokio::spawn(async move {

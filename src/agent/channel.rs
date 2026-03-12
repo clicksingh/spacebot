@@ -28,6 +28,7 @@ use rig::completion::CompletionModel;
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
+use sqlx::Row as _;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
@@ -53,6 +54,17 @@ struct PendingResult {
 }
 
 const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
+
+async fn load_persisted_message_count(pool: &sqlx::SqlitePool, channel_id: &str) -> usize {
+    sqlx::query("SELECT message_count FROM channel_message_counts WHERE channel_id = ?")
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.get::<i64, _>("message_count") as usize)
+        .unwrap_or(0)
+}
 
 async fn recv_channel_event(
     event_rx: &mut broadcast::Receiver<ProcessEvent>,
@@ -402,7 +414,7 @@ impl Channel {
     /// All tunable config (prompts, routing, thresholds, browser, skills) is read
     /// from `deps.runtime_config` on each use, so changes propagate to running
     /// channels without restart.
-    pub fn new(
+    pub async fn new(
         id: ChannelId,
         deps: AgentDeps,
         response_tx: mpsc::Sender<OutboundResponse>,
@@ -474,6 +486,8 @@ impl Channel {
 
         let self_tx = message_tx.clone();
         let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
+        let persisted_message_count =
+            load_persisted_message_count(&deps.sqlite_pool, id.as_ref()).await;
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -490,7 +504,7 @@ impl Channel {
             source_adapter: None,
             conversation_context: None,
             compactor,
-            message_count: 0,
+            message_count: persisted_message_count,
             memory_persistence_branches: HashSet::new(),
             branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
@@ -1497,12 +1511,22 @@ impl Channel {
             .current_adapter()
             .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
+        let working_state_context = self
+            .deps
+            .working_state_store
+            .get(self.id.as_ref(), 72)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.render());
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
         prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
+            working_state_context,
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
@@ -2160,10 +2184,20 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
+        let working_state_context = self
+            .deps
+            .working_state_store
+            .get(self.id.as_ref(), 72)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.render());
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
+            working_state_context,
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
@@ -3037,6 +3071,26 @@ impl Channel {
 
     /// Check if a memory persistence branch should be spawned based on message count.
     async fn check_memory_persistence(&mut self) {
+        // Persist count for cross-restart continuity. Fire-and-forget.
+        {
+            let pool = self.deps.sqlite_pool.clone();
+            let channel_id = self.id.to_string();
+            let count = self.message_count as i64;
+            tokio::spawn(async move {
+                let _ = sqlx::query(
+                    "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
+                     VALUES (?, ?, CURRENT_TIMESTAMP)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                         message_count = excluded.message_count,
+                         updated_at = CURRENT_TIMESTAMP",
+                )
+                .bind(&channel_id)
+                .bind(count)
+                .execute(&pool)
+                .await;
+            });
+        }
+
         let config = **self.deps.runtime_config.memory_persistence.load();
         if !config.enabled || config.message_interval == 0 {
             return;

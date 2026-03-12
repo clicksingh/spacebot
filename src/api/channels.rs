@@ -473,6 +473,7 @@ pub(super) async fn inspect_prompt(
     let system_prompt = prompt_engine
         .render_channel_prompt_with_links(
             empty_to_none(identity_context),
+            None,
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,

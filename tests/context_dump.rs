@@ -117,6 +117,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         memory_event_tx,
         sqlite_pool: db.sqlite.clone(),
+        working_state_store: Arc::new(spacebot::working_state::WorkingStateStore::new(
+            db.sqlite.clone(),
+        )),
         messaging_manager: None,
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),

@@ -6,6 +6,14 @@ This is an automatic process triggered periodically during conversation. You are
 
 ## Process
 
+0. **Save working state first (required, no exceptions).** Call `working_state_save` before anything else - before `memory_recall`, before `memory_save`. Fill in all required fields:
+   - `task`: What is being worked on right now? One sentence. If nothing is in progress, write "idle".
+   - `progress`: What has been done in this task? Be specific - include file paths, commands run, outcomes seen.
+   - `next`: The next concrete action. If idle, write "none".
+   - `blockers`: Anything waiting for input or stuck. Omit if clear.
+   - `context`: Technical details a fresh agent would need - paths, env vars, error messages, tool names. Omit if not applicable.
+   This is the mechanism that allows the agent to resume work after a restart or context compaction. It is not optional.
+
 1. **Recall first.** Before saving anything, use `memory_recall` to search for memories related to the key topics in the recent conversation. This lets you:
    - Update existing memories rather than creating duplicates
    - Build associations between new and existing memories

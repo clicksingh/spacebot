@@ -174,7 +174,11 @@ pub(crate) async fn spawn_memory_persistence_branch(
         "persisting memories...",
         "memory_persistence_branch",
         BranchSpawnOptions {
-            profile: BranchToolProfile::MemoryPersistence { contract_state },
+            profile: BranchToolProfile::MemoryPersistence {
+                contract_state,
+                working_state_store: deps.working_state_store.clone(),
+                channel_id: state.channel_id.to_string(),
+            },
         },
     )
     .await
@@ -233,7 +237,7 @@ async fn spawn_branch(
 ) -> std::result::Result<BranchId, AgentError> {
     let BranchSpawnOptions { profile } = branch_options;
     let memory_persistence_contract = match &profile {
-        BranchToolProfile::MemoryPersistence { contract_state } => Some(contract_state.clone()),
+        BranchToolProfile::MemoryPersistence { contract_state, .. } => Some(contract_state.clone()),
         BranchToolProfile::Default => None,
     };
 
