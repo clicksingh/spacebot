@@ -153,8 +153,16 @@ impl WorkingStateStore {
         } else {
             clamp_field(next_raw, MAX_NEXT_CHARS, "next")
         };
-        let blockers = normalize_optional(&state.blockers, MAX_BLOCKERS_CHARS, "blockers");
-        let context = normalize_optional(&state.context, MAX_CONTEXT_CHARS, "context");
+        let blockers = if is_idle {
+            None
+        } else {
+            normalize_optional(&state.blockers, MAX_BLOCKERS_CHARS, "blockers")
+        };
+        let context = if is_idle {
+            None
+        } else {
+            normalize_optional(&state.context, MAX_CONTEXT_CHARS, "context")
+        };
         let snapshot_seq = state.snapshot_seq.max(0);
 
         sqlx::query(
