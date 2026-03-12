@@ -155,6 +155,7 @@ pub async fn spawn_branch_from_state(
 pub(crate) async fn spawn_memory_persistence_branch(
     state: &ChannelState,
     deps: &AgentDeps,
+    working_state_snapshot_seq: i64,
 ) -> std::result::Result<BranchId, AgentError> {
     let contract_state = Arc::new(MemoryPersistenceContractState::default());
 
@@ -178,6 +179,7 @@ pub(crate) async fn spawn_memory_persistence_branch(
                 contract_state,
                 working_state_store: deps.working_state_store.clone(),
                 channel_id: state.channel_id.to_string(),
+                working_state_snapshot_seq,
             },
         },
     )

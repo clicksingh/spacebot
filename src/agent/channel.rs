@@ -55,15 +55,26 @@ struct PendingResult {
 
 const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
 
-async fn load_persisted_message_count(pool: &sqlx::SqlitePool, channel_id: &str) -> usize {
-    match sqlx::query("SELECT message_count FROM channel_message_counts WHERE channel_id = ?")
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
+#[derive(Debug, Clone, Copy)]
+struct PersistedMessageState {
+    message_count: usize,
+    message_seq: i64,
+}
+
+async fn load_persisted_message_state(
+    pool: &sqlx::SqlitePool,
+    channel_id: &str,
+) -> PersistedMessageState {
+    match sqlx::query(
+        "SELECT message_count, message_seq FROM channel_message_counts WHERE channel_id = ?",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
     {
         Ok(Some(row)) => {
             let raw_count = row.get::<i64, _>("message_count");
-            match usize::try_from(raw_count) {
+            let message_count = match usize::try_from(raw_count) {
                 Ok(count) => count,
                 Err(error) => {
                     tracing::warn!(
@@ -74,17 +85,59 @@ async fn load_persisted_message_count(pool: &sqlx::SqlitePool, channel_id: &str)
                     );
                     0
                 }
+            };
+            let message_seq = row.get::<i64, _>("message_seq");
+            PersistedMessageState {
+                message_count,
+                message_seq,
             }
         }
-        Ok(None) => 0,
+        Ok(None) => PersistedMessageState {
+            message_count: 0,
+            message_seq: 0,
+        },
         Err(error) => {
             tracing::warn!(
                 channel_id,
                 %error,
                 "failed to load persisted channel message count; defaulting to 0"
             );
-            0
+            PersistedMessageState {
+                message_count: 0,
+                message_seq: 0,
+            }
         }
+    }
+}
+
+async fn persist_message_count_state(
+    pool: sqlx::SqlitePool,
+    channel_id: String,
+    message_count: i64,
+    message_seq: i64,
+) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO channel_message_counts (channel_id, message_count, message_seq, updated_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(channel_id) DO UPDATE SET
+             message_count = excluded.message_count,
+             message_seq = excluded.message_seq,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE excluded.message_seq > channel_message_counts.message_seq",
+    )
+    .bind(&channel_id)
+    .bind(message_count)
+    .bind(message_seq)
+    .execute(&pool)
+    .await
+    {
+        tracing::warn!(
+            channel_id,
+            message_count,
+            message_seq,
+            %error,
+            "failed to persist channel message count"
+        );
     }
 }
 
@@ -376,6 +429,10 @@ pub struct Channel {
     pub compactor: Compactor,
     /// Count of user messages since last memory persistence branch.
     message_count: usize,
+    /// Monotonic sequence for persisted message-count writes.
+    message_persist_seq: i64,
+    /// Monotonic sequence for memory-persistence snapshots.
+    working_state_snapshot_seq: i64,
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
     /// Optional Discord reply target captured when each branch was started.
@@ -508,8 +565,23 @@ impl Channel {
 
         let self_tx = message_tx.clone();
         let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
-        let persisted_message_count =
-            load_persisted_message_count(&deps.sqlite_pool, id.as_ref()).await;
+        let persisted_message_state =
+            load_persisted_message_state(&deps.sqlite_pool, id.as_ref()).await;
+        let working_state_snapshot_seq = match deps
+            .working_state_store
+            .latest_snapshot_seq(id.as_ref())
+            .await
+        {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %id,
+                    %error,
+                    "failed to load working-state snapshot sequence; defaulting to 0"
+                );
+                0
+            }
+        };
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -526,7 +598,9 @@ impl Channel {
             source_adapter: None,
             conversation_context: None,
             compactor,
-            message_count: persisted_message_count,
+            message_count: persisted_message_state.message_count,
+            message_persist_seq: persisted_message_state.message_seq,
+            working_state_snapshot_seq,
             memory_persistence_branches: HashSet::new(),
             branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
@@ -3104,9 +3178,12 @@ impl Channel {
             && config.message_interval > 0
             && self.message_count >= config.message_interval
         {
-            match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+            let next_snapshot_seq = self.working_state_snapshot_seq + 1;
+            match spawn_memory_persistence_branch(&self.state, &self.deps, next_snapshot_seq).await
+            {
                 Ok(branch_id) => {
                     self.memory_persistence_branches.insert(branch_id);
+                    self.working_state_snapshot_seq = next_snapshot_seq;
                     // Only clear the interval count when a branch actually starts.
                     self.message_count = 0;
                     tracing::info!(
@@ -3128,33 +3205,16 @@ impl Channel {
 
         // Persist settled count for cross-restart continuity without blocking the hot path.
         let settled_count = self.message_count as i64;
-        let settled_at_ms = chrono::Utc::now().timestamp_millis();
+        let next_message_seq = self.message_persist_seq + 1;
+        self.message_persist_seq = next_message_seq;
         let channel_id = self.id.to_string();
         let pool = self.deps.sqlite_pool.clone();
-        tokio::spawn(async move {
-            if let Err(error) = sqlx::query(
-                "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
-                 VALUES (?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', ? / 1000.0, 'unixepoch'))
-                 ON CONFLICT(channel_id) DO UPDATE SET
-                     message_count = excluded.message_count,
-                     updated_at = excluded.updated_at
-                 WHERE julianday(excluded.updated_at) >= julianday(channel_message_counts.updated_at)",
-            )
-            .bind(&channel_id)
-            .bind(settled_count)
-            .bind(settled_at_ms)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(
-                    channel_id,
-                    message_count = settled_count,
-                    settled_at_ms,
-                    %error,
-                    "failed to persist channel message count"
-                );
-            }
-        });
+        tokio::spawn(persist_message_count_state(
+            pool,
+            channel_id,
+            settled_count,
+            next_message_seq,
+        ));
     }
 
     /// If prompt capture is enabled for this channel, snapshot the current
@@ -3226,9 +3286,13 @@ impl Channel {
 
 #[cfg(test)]
 mod tests {
-    use super::{recv_channel_event, should_process_event_for_channel};
+    use super::{
+        load_persisted_message_state, persist_message_count_state, recv_channel_event,
+        should_process_event_for_channel,
+    };
     use crate::memory::MemoryType;
     use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
+    use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -3369,5 +3433,36 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[tokio::test]
+    async fn message_count_persistence_prefers_higher_sequence() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open in-memory sqlite");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE channel_message_counts (
+                channel_id    TEXT PRIMARY KEY,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                message_seq   INTEGER NOT NULL DEFAULT 0,
+                updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create channel_message_counts table");
+
+        let channel_id = "channel-ordering".to_string();
+        persist_message_count_state(pool.clone(), channel_id.clone(), 9, 2).await;
+        persist_message_count_state(pool.clone(), channel_id.clone(), 3, 1).await;
+
+        let state = load_persisted_message_state(&pool, &channel_id).await;
+        assert_eq!(state.message_count, 9);
+        assert_eq!(state.message_seq, 2);
     }
 }

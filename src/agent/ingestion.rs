@@ -502,6 +502,7 @@ async fn process_chunk(
             contract_state: contract_state.clone(),
             working_state_store: deps.working_state_store.clone(),
             channel_id: format!("ingestion:{}:{file_key}", deps.agent_id),
+            working_state_snapshot_seq: chunk_number as i64,
         },
     );
 

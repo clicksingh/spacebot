@@ -190,6 +190,7 @@ pub enum BranchToolProfile {
         contract_state: Arc<MemoryPersistenceContractState>,
         working_state_store: Arc<crate::working_state::WorkingStateStore>,
         channel_id: String,
+        working_state_snapshot_seq: i64,
     },
 }
 
@@ -542,12 +543,14 @@ pub fn create_branch_tool_server(
         contract_state,
         working_state_store,
         channel_id,
+        working_state_snapshot_seq,
     } = profile
     {
         server = server.tool(MemoryPersistenceCompleteTool::new(contract_state));
         server = server.tool(crate::tools::working_state_save::WorkingStateSaveTool::new(
             working_state_store,
             channel_id,
+            working_state_snapshot_seq,
         ));
     }
 

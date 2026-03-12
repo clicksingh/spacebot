@@ -75,6 +75,8 @@ pub struct WorkingState {
     /// Relevant technical details: file paths, commands, error messages,
     /// environment facts. None if not applicable.
     pub context: Option<String>,
+    /// Monotonic snapshot sequence assigned at branch spawn time.
+    pub snapshot_seq: i64,
     /// When this was last written.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -153,18 +155,23 @@ impl WorkingStateStore {
         };
         let blockers = normalize_optional(&state.blockers, MAX_BLOCKERS_CHARS, "blockers");
         let context = normalize_optional(&state.context, MAX_CONTEXT_CHARS, "context");
+        let snapshot_seq = state.snapshot_seq.max(0);
 
         sqlx::query(
             r#"
-            INSERT INTO working_state (channel_id, task, progress, next, blockers, context, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO working_state (
+                channel_id, task, progress, next, blockers, context, snapshot_seq, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(channel_id) DO UPDATE SET
                 task       = excluded.task,
                 progress   = excluded.progress,
                 next       = excluded.next,
                 blockers   = excluded.blockers,
                 context    = excluded.context,
+                snapshot_seq = excluded.snapshot_seq,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE excluded.snapshot_seq >= working_state.snapshot_seq
             "#,
         )
         .bind(&state.channel_id)
@@ -173,9 +180,15 @@ impl WorkingStateStore {
         .bind(&next)
         .bind(&blockers)
         .bind(&context)
+        .bind(snapshot_seq)
         .execute(self.pool.as_ref())
         .await
-        .with_context(|| format!("failed to upsert working state for channel {}", state.channel_id))?;
+        .with_context(|| {
+            format!(
+                "failed to upsert working state for channel {}",
+                state.channel_id
+            )
+        })?;
 
         Ok(())
     }
@@ -185,7 +198,7 @@ impl WorkingStateStore {
     pub async fn get(&self, channel_id: &str, max_age_hours: i64) -> Result<Option<WorkingState>> {
         let row = sqlx::query(
             r#"
-            SELECT channel_id, task, progress, next, blockers, context, updated_at
+            SELECT channel_id, task, progress, next, blockers, context, snapshot_seq, updated_at
             FROM working_state
             WHERE channel_id = ?
               AND updated_at > datetime('now', ? || ' hours')
@@ -204,8 +217,26 @@ impl WorkingStateStore {
             next: r.get::<String, _>("next"),
             blockers: r.get::<Option<String>, _>("blockers"),
             context: r.get::<Option<String>, _>("context"),
+            snapshot_seq: r.get::<i64, _>("snapshot_seq"),
             updated_at: r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         }))
+    }
+
+    pub async fn latest_snapshot_seq(&self, channel_id: &str) -> Result<i64> {
+        let row = sqlx::query("SELECT snapshot_seq FROM working_state WHERE channel_id = ?")
+            .bind(channel_id)
+            .fetch_optional(self.pool.as_ref())
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load latest working-state snapshot sequence for channel {}",
+                    channel_id
+                )
+            })?;
+
+        Ok(row
+            .map(|record| record.get::<i64, _>("snapshot_seq"))
+            .unwrap_or(0))
     }
 
     /// Clear working state for a channel (e.g. when a task is marked complete).
@@ -223,6 +254,7 @@ impl WorkingStateStore {
 #[derive(Debug, Clone)]
 pub struct WorkingStateInput {
     pub channel_id: String,
+    pub snapshot_seq: i64,
     pub task: String,
     pub progress: String,
     pub next: String,

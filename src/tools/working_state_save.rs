@@ -12,13 +12,19 @@ use std::sync::Arc;
 pub struct WorkingStateSaveTool {
     store: Arc<WorkingStateStore>,
     channel_id: String,
+    snapshot_seq: i64,
 }
 
 impl WorkingStateSaveTool {
-    pub fn new(store: Arc<WorkingStateStore>, channel_id: impl Into<String>) -> Self {
+    pub fn new(
+        store: Arc<WorkingStateStore>,
+        channel_id: impl Into<String>,
+        snapshot_seq: i64,
+    ) -> Self {
         Self {
             store,
             channel_id: channel_id.into(),
+            snapshot_seq,
         }
     }
 }
@@ -113,6 +119,7 @@ impl Tool for WorkingStateSaveTool {
 
         let input = WorkingStateInput {
             channel_id: self.channel_id.clone(),
+            snapshot_seq: self.snapshot_seq,
             task: args.task,
             progress,
             next,
