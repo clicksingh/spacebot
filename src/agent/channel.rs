@@ -3071,55 +3071,54 @@ impl Channel {
 
     /// Check if a memory persistence branch should be spawned based on message count.
     async fn check_memory_persistence(&mut self) {
-        // Persist count for cross-restart continuity. Fire-and-forget.
-        {
-            let pool = self.deps.sqlite_pool.clone();
-            let channel_id = self.id.to_string();
-            let count = self.message_count as i64;
-            tokio::spawn(async move {
-                let _ = sqlx::query(
-                    "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
-                     VALUES (?, ?, CURRENT_TIMESTAMP)
-                     ON CONFLICT(channel_id) DO UPDATE SET
-                         message_count = excluded.message_count,
-                         updated_at = CURRENT_TIMESTAMP",
-                )
-                .bind(&channel_id)
-                .bind(count)
-                .execute(&pool)
-                .await;
-            });
-        }
-
         let config = **self.deps.runtime_config.memory_persistence.load();
-        if !config.enabled || config.message_interval == 0 {
-            return;
+        if config.enabled
+            && config.message_interval > 0
+            && self.message_count >= config.message_interval
+        {
+            // Reset counter before spawning so subsequent messages don't pile up.
+            self.message_count = 0;
+
+            match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+                Ok(branch_id) => {
+                    self.memory_persistence_branches.insert(branch_id);
+                    tracing::info!(
+                        channel_id = %self.id,
+                        branch_id = %branch_id,
+                        interval = config.message_interval,
+                        "memory persistence branch spawned"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        %error,
+                        "failed to spawn memory persistence branch"
+                    );
+                }
+            }
         }
 
-        if self.message_count < config.message_interval {
-            return;
-        }
-
-        // Reset counter before spawning so subsequent messages don't pile up
-        self.message_count = 0;
-
-        match spawn_memory_persistence_branch(&self.state, &self.deps).await {
-            Ok(branch_id) => {
-                self.memory_persistence_branches.insert(branch_id);
-                tracing::info!(
-                    channel_id = %self.id,
-                    branch_id = %branch_id,
-                    interval = config.message_interval,
-                    "memory persistence branch spawned"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    channel_id = %self.id,
-                    %error,
-                    "failed to spawn memory persistence branch"
-                );
-            }
+        // Persist settled count for cross-restart continuity.
+        let settled_count = self.message_count as i64;
+        if let Err(error) = sqlx::query(
+            "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
+             VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(channel_id) DO UPDATE SET
+                 message_count = excluded.message_count,
+                 updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(self.id.as_ref())
+        .bind(settled_count)
+        .execute(&self.deps.sqlite_pool)
+        .await
+        {
+            tracing::warn!(
+                channel_id = %self.id,
+                message_count = settled_count,
+                %error,
+                "failed to persist channel message count"
+            );
         }
     }
 

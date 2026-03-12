@@ -9,6 +9,40 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row as _, SqlitePool};
 use std::sync::Arc;
 
+const MAX_TASK_CHARS: usize = 400;
+const MAX_PROGRESS_CHARS: usize = 2_000;
+const MAX_NEXT_CHARS: usize = 800;
+const MAX_BLOCKERS_CHARS: usize = 800;
+const MAX_CONTEXT_CHARS: usize = 4_000;
+
+fn clamp_field(value: &str, max_chars: usize, field_name: &str) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+
+    tracing::warn!(
+        field = field_name,
+        original_chars = char_count,
+        max_chars,
+        "working_state field exceeded size budget and was truncated"
+    );
+
+    value.chars().take(max_chars).collect()
+}
+
+fn normalize_optional(
+    value: &Option<String>,
+    max_chars: usize,
+    field_name: &str,
+) -> Option<String> {
+    value
+        .as_ref()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| clamp_field(item, max_chars, field_name))
+}
+
 /// Current task state for a channel. Structured so the LLM writes consistent
 /// summaries and so the injected context is easy for the model to parse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +115,28 @@ impl WorkingStateStore {
 
     /// Upsert the working state for a channel. Replaces any existing row.
     pub async fn upsert(&self, state: &WorkingStateInput) -> Result<()> {
+        let task_raw = state.task.trim();
+        let progress_raw = state.progress.trim();
+        let next_raw = state.next.trim();
+
+        let task = if task_raw.is_empty() {
+            "idle".to_string()
+        } else {
+            clamp_field(task_raw, MAX_TASK_CHARS, "task")
+        };
+        let progress = if progress_raw.is_empty() {
+            "none".to_string()
+        } else {
+            clamp_field(progress_raw, MAX_PROGRESS_CHARS, "progress")
+        };
+        let next = if next_raw.is_empty() {
+            "none".to_string()
+        } else {
+            clamp_field(next_raw, MAX_NEXT_CHARS, "next")
+        };
+        let blockers = normalize_optional(&state.blockers, MAX_BLOCKERS_CHARS, "blockers");
+        let context = normalize_optional(&state.context, MAX_CONTEXT_CHARS, "context");
+
         sqlx::query(
             r#"
             INSERT INTO working_state (channel_id, task, progress, next, blockers, context, updated_at)
@@ -95,11 +151,11 @@ impl WorkingStateStore {
             "#,
         )
         .bind(&state.channel_id)
-        .bind(&state.task)
-        .bind(&state.progress)
-        .bind(&state.next)
-        .bind(&state.blockers)
-        .bind(&state.context)
+        .bind(&task)
+        .bind(&progress)
+        .bind(&next)
+        .bind(&blockers)
+        .bind(&context)
         .execute(self.pool.as_ref())
         .await
         .with_context(|| format!("failed to upsert working state for channel {}", state.channel_id))?;

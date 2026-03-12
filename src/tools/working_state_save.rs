@@ -34,11 +34,13 @@ pub struct WorkingStateSaveArgs {
 
     /// What has been done so far. Concise. Example:
     /// "Confirmed opencode binary at /home/click/.opencode/bin/opencode. RTK wrapper created. Config updated."
-    pub progress: String,
+    #[serde(default)]
+    pub progress: Option<String>,
 
     /// What comes next. Actionable. Example:
     /// "Restart spacebot and test by asking agent to run opencode."
-    pub next: String,
+    #[serde(default)]
+    pub next: Option<String>,
 
     /// Anything stuck, blocked, or waiting. Omit if nothing is blocked.
     #[serde(default)]
@@ -95,17 +97,26 @@ impl Tool for WorkingStateSaveTool {
                         "description": "Relevant technical details: paths, commands, error messages. Omit if not applicable."
                     }
                 },
-                "required": ["task", "progress", "next"]
+                "required": ["task"]
             }),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let progress = args
+            .progress
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "none".to_string());
+        let next = args
+            .next
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "none".to_string());
+
         let input = WorkingStateInput {
             channel_id: self.channel_id.clone(),
             task: args.task,
-            progress: args.progress,
-            next: args.next,
+            progress,
+            next,
             blockers: args.blockers,
             context: args.context,
         };
