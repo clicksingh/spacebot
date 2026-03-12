@@ -185,6 +185,7 @@ async fn process_file(
     }
 
     let hash = content_hash(&content);
+    let working_state_channel_id = format!("ingestion:{}:{}", deps.agent_id, hash);
     let file_size = content.len() as i64;
     let chunks = chunk_text(&content, config.chunk_size);
     let total_chunks = chunks.len();
@@ -220,6 +221,22 @@ async fn process_file(
     }
 
     let mut had_failure = false;
+    let mut next_working_state_snapshot_seq = match deps
+        .working_state_store
+        .latest_snapshot_seq(&working_state_channel_id)
+        .await
+    {
+        Ok(sequence) => sequence + 1,
+        Err(error) => {
+            tracing::warn!(
+                file = %filename,
+                channel_id = %working_state_channel_id,
+                %error,
+                "failed to load ingestion working-state snapshot sequence; defaulting to 1"
+            );
+            1
+        }
+    };
 
     for (index, chunk) in chunks.iter().enumerate() {
         let chunk_number = index + 1;
@@ -240,7 +257,19 @@ async fn process_file(
             "processing chunk"
         );
 
-        match process_chunk(chunk, filename, &hash, chunk_number, total_chunks, deps).await {
+        let working_state_snapshot_seq = next_working_state_snapshot_seq;
+        next_working_state_snapshot_seq += 1;
+        match process_chunk(
+            chunk,
+            filename,
+            &working_state_channel_id,
+            working_state_snapshot_seq,
+            chunk_number,
+            total_chunks,
+            deps,
+        )
+        .await
+        {
             Ok(()) => {
                 record_chunk_completed(
                     &deps.sqlite_pool,
@@ -469,7 +498,8 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
 async fn process_chunk(
     chunk: &str,
     filename: &str,
-    file_key: &str,
+    working_state_channel_id: &str,
+    working_state_snapshot_seq: i64,
     chunk_number: usize,
     total_chunks: usize,
     deps: &AgentDeps,
@@ -501,8 +531,8 @@ async fn process_chunk(
         crate::tools::BranchToolProfile::MemoryPersistence {
             contract_state: contract_state.clone(),
             working_state_store: deps.working_state_store.clone(),
-            channel_id: format!("ingestion:{}:{file_key}", deps.agent_id),
-            working_state_snapshot_seq: chunk_number as i64,
+            channel_id: working_state_channel_id.to_string(),
+            working_state_snapshot_seq,
         },
     );
 

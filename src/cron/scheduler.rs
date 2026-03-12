@@ -846,7 +846,9 @@ fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
 async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     ensure_cron_dispatch_readiness(context, &job.id);
-    let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
+    let run_id = uuid::Uuid::new_v4();
+    let channel_id_value = format!("cron:{}:{run_id}", job.id);
+    let channel_id: crate::ChannelId = Arc::from(channel_id_value.as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
     let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<OutboundResponse>(32);
@@ -877,7 +879,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         id: uuid::Uuid::new_v4().to_string(),
         source: "cron".into(),
         adapter: None,
-        conversation_id: format!("cron:{}", job.id),
+        conversation_id: channel_id_value.clone(),
         sender_id: "system".into(),
         agent_id: Some(context.deps.agent_id.clone()),
         content: MessageContent::Text(job.prompt.clone()),

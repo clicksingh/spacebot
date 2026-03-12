@@ -463,6 +463,23 @@ pub(super) async fn inspect_prompt(
     };
 
     let sandbox_enabled = channel_state.deps.sandbox.containment_active();
+    let working_state_context = match channel_state
+        .deps
+        .working_state_store
+        .get(&query.channel_id, 72)
+        .await
+    {
+        Ok(Some(working_state)) => Some(working_state.render()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = %query.channel_id,
+                %error,
+                "failed to load working state context for inspect_prompt"
+            );
+            None
+        }
+    };
 
     // ── Render the full system prompt ──
     // This is a best-effort reconstruction from the API layer. It lacks
@@ -473,7 +490,7 @@ pub(super) async fn inspect_prompt(
     let system_prompt = prompt_engine
         .render_channel_prompt_with_links(
             empty_to_none(identity_context),
-            None,
+            working_state_context,
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
