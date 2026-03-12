@@ -61,7 +61,21 @@ async fn load_persisted_message_count(pool: &sqlx::SqlitePool, channel_id: &str)
         .fetch_optional(pool)
         .await
     {
-        Ok(Some(row)) => row.get::<i64, _>("message_count") as usize,
+        Ok(Some(row)) => {
+            let raw_count = row.get::<i64, _>("message_count");
+            match usize::try_from(raw_count) {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::warn!(
+                        channel_id,
+                        raw_count,
+                        %error,
+                        "persisted channel message count was invalid; defaulting to 0"
+                    );
+                    0
+                }
+            }
+        }
         Ok(None) => 0,
         Err(error) => {
             tracing::warn!(
@@ -3124,27 +3138,35 @@ impl Channel {
             }
         }
 
-        // Persist settled count for cross-restart continuity.
+        // Persist settled count for cross-restart continuity without blocking the hot path.
         let settled_count = self.message_count as i64;
-        if let Err(error) = sqlx::query(
-            "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
-             VALUES (?, ?, CURRENT_TIMESTAMP)
-             ON CONFLICT(channel_id) DO UPDATE SET
-                 message_count = excluded.message_count,
-                 updated_at = CURRENT_TIMESTAMP",
-        )
-        .bind(self.id.as_ref())
-        .bind(settled_count)
-        .execute(&self.deps.sqlite_pool)
-        .await
-        {
-            tracing::warn!(
-                channel_id = %self.id,
-                message_count = settled_count,
-                %error,
-                "failed to persist channel message count"
-            );
-        }
+        let settled_at_ms = chrono::Utc::now().timestamp_millis();
+        let channel_id = self.id.to_string();
+        let pool = self.deps.sqlite_pool.clone();
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO channel_message_counts (channel_id, message_count, updated_at)
+                 VALUES (?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', ? / 1000.0, 'unixepoch'))
+                 ON CONFLICT(channel_id) DO UPDATE SET
+                     message_count = excluded.message_count,
+                     updated_at = excluded.updated_at
+                 WHERE julianday(excluded.updated_at) >= julianday(channel_message_counts.updated_at)",
+            )
+            .bind(&channel_id)
+            .bind(settled_count)
+            .bind(settled_at_ms)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(
+                    channel_id,
+                    message_count = settled_count,
+                    settled_at_ms,
+                    %error,
+                    "failed to persist channel message count"
+                );
+            }
+        });
     }
 
     /// If prompt capture is enabled for this channel, snapshot the current
