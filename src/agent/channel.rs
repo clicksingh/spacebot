@@ -1533,23 +1533,7 @@ impl Channel {
             .current_adapter()
             .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
-        let working_state_context = match self
-            .deps
-            .working_state_store
-            .get(self.id.as_ref(), 72)
-            .await
-        {
-            Ok(Some(working_state)) => Some(working_state.render()),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id = %self.id,
-                    %error,
-                    "failed to load working state context; continuing without it"
-                );
-                None
-            }
-        };
+        let working_state_context = self.load_working_state_context().await;
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -1976,6 +1960,26 @@ impl Channel {
         prompt_engine.render_available_channels(entries).ok()
     }
 
+    async fn load_working_state_context(&self) -> Option<String> {
+        match self
+            .deps
+            .working_state_store
+            .get(self.id.as_ref(), 72)
+            .await
+        {
+            Ok(Some(working_state)) => Some(working_state.render()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to load working state context; continuing without it"
+                );
+                None
+            }
+        }
+    }
+
     /// Build org context showing the agent's position in the communication hierarchy.
     fn build_org_context(&self, prompt_engine: &crate::prompts::PromptEngine) -> Option<String> {
         let agent_id = self.deps.agent_id.as_ref();
@@ -2215,23 +2219,7 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
-        let working_state_context = match self
-            .deps
-            .working_state_store
-            .get(self.id.as_ref(), 72)
-            .await
-        {
-            Ok(Some(working_state)) => Some(working_state.render()),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id = %self.id,
-                    %error,
-                    "failed to load working state context; continuing without it"
-                );
-                None
-            }
-        };
+        let working_state_context = self.load_working_state_context().await;
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 

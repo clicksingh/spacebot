@@ -89,11 +89,11 @@ impl WorkingState {
         render_labeled_field(&mut out, "Progress", &self.progress);
         render_labeled_field(&mut out, "Next", &self.next);
 
-        if let Some(ref b) = self.blockers {
-            render_labeled_field(&mut out, "Blockers", b);
+        if let Some(ref blockers) = self.blockers {
+            render_labeled_field(&mut out, "Blockers", blockers);
         }
-        if let Some(ref c) = self.context {
-            render_labeled_field(&mut out, "Context", c);
+        if let Some(ref context) = self.context {
+            render_labeled_field(&mut out, "Context", context);
         }
 
         // Age note so the model knows how stale this is.
@@ -134,17 +134,19 @@ impl WorkingStateStore {
         let progress_raw = state.progress.trim();
         let next_raw = state.next.trim();
 
-        let task = if task_raw.is_empty() {
+        let is_idle = task_raw.is_empty() || task_raw.eq_ignore_ascii_case("idle");
+
+        let task = if is_idle {
             "idle".to_string()
         } else {
             clamp_field(task_raw, MAX_TASK_CHARS, "task")
         };
-        let progress = if progress_raw.is_empty() {
+        let progress = if is_idle || progress_raw.is_empty() {
             "none".to_string()
         } else {
             clamp_field(progress_raw, MAX_PROGRESS_CHARS, "progress")
         };
-        let next = if next_raw.is_empty() {
+        let next = if is_idle || next_raw.is_empty() {
             "none".to_string()
         } else {
             clamp_field(next_raw, MAX_NEXT_CHARS, "next")

@@ -197,6 +197,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     prompt_engine
         .render_channel_prompt(
             empty_to_none(identity_context),
+            None,
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,

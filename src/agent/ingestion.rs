@@ -240,7 +240,7 @@ async fn process_file(
             "processing chunk"
         );
 
-        match process_chunk(chunk, filename, chunk_number, total_chunks, deps).await {
+        match process_chunk(chunk, filename, &hash, chunk_number, total_chunks, deps).await {
             Ok(()) => {
                 record_chunk_completed(
                     &deps.sqlite_pool,
@@ -469,6 +469,7 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
 async fn process_chunk(
     chunk: &str,
     filename: &str,
+    file_key: &str,
     chunk_number: usize,
     total_chunks: usize,
     deps: &AgentDeps,
@@ -500,7 +501,7 @@ async fn process_chunk(
         crate::tools::BranchToolProfile::MemoryPersistence {
             contract_state: contract_state.clone(),
             working_state_store: deps.working_state_store.clone(),
-            channel_id: format!("ingestion:{}", deps.agent_id),
+            channel_id: format!("ingestion:{}:{file_key}", deps.agent_id),
         },
     );
 

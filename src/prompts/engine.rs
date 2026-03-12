@@ -449,6 +449,7 @@ impl PromptEngine {
     pub fn render_channel_prompt(
         &self,
         identity_context: Option<String>,
+        working_state_context: Option<String>,
         memory_bulletin: Option<String>,
         skills_prompt: Option<String>,
         worker_capabilities: String,
@@ -460,7 +461,7 @@ impl PromptEngine {
     ) -> Result<String> {
         self.render_channel_prompt_with_links(
             identity_context,
-            None,
+            working_state_context,
             memory_bulletin,
             skills_prompt,
             worker_capabilities,
