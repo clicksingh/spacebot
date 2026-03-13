@@ -125,6 +125,10 @@ pub struct ChannelState {
     /// `ToolStarted`/`ToolCompleted` events as they flow through the system.
     /// Defaults to a standalone empty map when the API layer is not active.
     pub live_worker_transcripts: LiveWorkerTranscripts,
+    /// Snapshot of emergency-mode MCP tool names mounted during the last turn.
+    /// Used for deterministic teardown even if MCP connectivity changes before
+    /// removal runs.
+    pub emergency_mcp_tool_names: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ChannelState {
@@ -537,6 +541,7 @@ impl Channel {
             prompt_snapshot_store,
             live_worker_transcripts: live_worker_transcripts
                 .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
+            emergency_mcp_tool_names: Arc::new(RwLock::new(HashSet::new())),
         };
 
         // Each channel gets its own isolated tool server to avoid races between

@@ -1665,6 +1665,7 @@ impl Config {
             .agents
             .into_iter()
             .map(|a| -> Result<AgentConfig> {
+                let agent_id_for_context = a.id.clone();
                 // Per-agent routing resolves against instance defaults
                 let agent_routing = a
                     .routing
@@ -1786,7 +1787,10 @@ impl Config {
                         } else {
                             normalize_admin_identities(
                                 channel_config.admin_identities,
-                                "agents.<id>.channel.admin_identities",
+                                &format!(
+                                    "agents.{}.channel.admin_identities",
+                                    agent_id_for_context
+                                ),
                             )
                         },
                     }),

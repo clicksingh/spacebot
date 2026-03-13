@@ -546,9 +546,14 @@ async fn add_emergency_channel_tools(
     }
 
     let mcp_tools = state.deps.mcp_manager.get_tools().await;
+    let mut mounted_mcp_tool_names = Vec::new();
     for mcp_tool in mcp_tools {
+        let tool_name = mcp_tool.name();
         handle.add_tool(mcp_tool).await?;
+        mounted_mcp_tool_names.push(tool_name);
     }
+    let mut snapshot = state.emergency_mcp_tool_names.write().await;
+    *snapshot = mounted_mcp_tool_names.into_iter().collect();
     Ok(())
 }
 
@@ -605,44 +610,74 @@ pub async fn remove_channel_tools(
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
     if emergency_override_mode {
-        remove_emergency_channel_tools(handle, state).await;
+        if let Err(error) = remove_emergency_channel_tools(handle, state).await {
+            tracing::warn!(%error, "failed to fully remove emergency channel tools");
+        }
     }
     Ok(())
 }
 
-async fn remove_emergency_channel_tools(handle: &ToolServerHandle, state: &ChannelState) {
-    let _ = handle.remove_tool(SpacebotDocsTool::NAME).await;
-    let _ = handle.remove_tool(MemorySaveTool::NAME).await;
-    let _ = handle.remove_tool(MemoryRecallTool::NAME).await;
-    let _ = handle.remove_tool(MemoryDeleteTool::NAME).await;
-    let _ = handle.remove_tool(ChannelRecallTool::NAME).await;
-    let _ = handle.remove_tool(EmailSearchTool::NAME).await;
-    let _ = handle.remove_tool(WorkerInspectTool::NAME).await;
-    let _ = handle.remove_tool(TaskCreateTool::NAME).await;
-    let _ = handle.remove_tool(TaskListTool::NAME).await;
-    let _ = handle.remove_tool(TaskUpdateTool::NAME).await;
-    let _ = handle.remove_tool(ShellTool::NAME).await;
-    let _ = handle.remove_tool(ReadSkillTool::NAME).await;
-    let _ = handle.remove_tool(FileReadTool::NAME).await;
-    let _ = handle.remove_tool(FileWriteTool::NAME).await;
-    let _ = handle.remove_tool(FileEditTool::NAME).await;
-    let _ = handle.remove_tool(FileListTool::NAME).await;
-    let _ = handle.remove_tool(SecretSetTool::NAME).await;
-    let _ = handle.remove_tool(WebSearchTool::NAME).await;
-    if let Err(error) = remove_browser_tools_from_handle(handle).await {
-        tracing::warn!(%error, "failed to remove one or more browser emergency tools");
-    }
+async fn remove_emergency_channel_tools(
+    handle: &ToolServerHandle,
+    state: &ChannelState,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let mut first_error = None;
 
-    // MCP tool names are dynamic; remove current connected set best-effort.
-    for mcp_tool in state.deps.mcp_manager.get_tools().await {
-        if let Err(error) = handle.remove_tool(&mcp_tool.name()).await {
-            tracing::warn!(
-                %error,
-                tool_name = %mcp_tool.name(),
-                "failed to remove emergency MCP tool"
-            );
+    async fn remove_best_effort(
+        handle: &ToolServerHandle,
+        tool_name: &str,
+        first_error: &mut Option<rig::tool::server::ToolServerError>,
+    ) {
+        if let Err(error) = handle.remove_tool(tool_name).await {
+            tracing::warn!(%error, %tool_name, "failed to remove emergency tool");
+            if first_error.is_none() {
+                *first_error = Some(error);
+            }
         }
     }
+
+    remove_best_effort(handle, SpacebotDocsTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, MemorySaveTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, MemoryRecallTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, MemoryDeleteTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, ChannelRecallTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, EmailSearchTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, WorkerInspectTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, TaskCreateTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, TaskListTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, TaskUpdateTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, ShellTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, ReadSkillTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, FileReadTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, FileWriteTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, FileEditTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, FileListTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, SecretSetTool::NAME, &mut first_error).await;
+    remove_best_effort(handle, WebSearchTool::NAME, &mut first_error).await;
+
+    // Match add-path gating: only attempt browser teardown when enabled.
+    if state.deps.runtime_config.browser_config.load().enabled
+        && let Err(error) = remove_browser_tools_from_handle(handle).await
+    {
+        tracing::warn!(%error, "failed to remove one or more browser emergency tools");
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+
+    // Remove from the snapshot captured when emergency tools were mounted.
+    let mcp_tool_names = {
+        let mut snapshot = state.emergency_mcp_tool_names.write().await;
+        std::mem::take(&mut *snapshot)
+    };
+    for tool_name in mcp_tool_names {
+        remove_best_effort(handle, &tool_name, &mut first_error).await;
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn memory_save_with_events(
