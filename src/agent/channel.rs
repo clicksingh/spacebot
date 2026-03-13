@@ -15,6 +15,7 @@ use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
+use crate::config::ChannelAdminIdentity;
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
@@ -451,6 +452,10 @@ pub struct Channel {
     listen_only_mode: bool,
     /// Session-scoped override used when persistence is unavailable/failed.
     listen_only_session_override: Option<bool>,
+    /// Channel-local emergency override mode toggle.
+    emergency_override_mode: bool,
+    /// Session-scoped override used when persistence is unavailable/failed.
+    emergency_override_session_override: Option<bool>,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
 }
@@ -557,6 +562,7 @@ impl Channel {
 
         let self_tx = message_tx.clone();
         let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
+        let resolved_emergency_override_mode = false;
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -588,6 +594,8 @@ impl Channel {
             backfill_transcript: None,
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
+            emergency_override_mode: resolved_emergency_override_mode,
+            emergency_override_session_override: None,
             control_handle,
         };
 
@@ -692,6 +700,93 @@ impl Channel {
         self.listen_only_mode = enabled;
         self.listen_only_session_override = if persisted { None } else { Some(enabled) };
         persisted
+    }
+
+    fn sync_emergency_override_mode_from_runtime(&mut self) {
+        if let Some(override_mode) = self.emergency_override_session_override {
+            self.emergency_override_mode = override_mode;
+            return;
+        }
+        let runtime_default = false;
+        let settings_store = self
+            .deps
+            .runtime_config
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .cloned();
+        self.emergency_override_mode = if let Some(settings_store) = settings_store {
+            match settings_store.channel_emergency_override_mode_for(self.id.as_ref()) {
+                Ok(Some(enabled)) => enabled,
+                Ok(None) => runtime_default,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        "failed to sync channel-scoped emergency_override_mode setting"
+                    );
+                    runtime_default
+                }
+            }
+        } else {
+            runtime_default
+        };
+    }
+
+    fn set_emergency_override_mode(&mut self, enabled: bool) -> bool {
+        let mut persisted = false;
+        let settings_store = self
+            .deps
+            .runtime_config
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .cloned();
+        if let Some(settings_store) = settings_store {
+            match settings_store.set_channel_emergency_override_mode_for(self.id.as_ref(), enabled)
+            {
+                Ok(()) => persisted = true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        emergency_override_mode = enabled,
+                        "failed to persist emergency_override_mode setting"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                channel_id = %self.id,
+                emergency_override_mode = enabled,
+                "settings store unavailable; emergency_override_mode is session-scoped"
+            );
+        }
+
+        self.emergency_override_mode = enabled;
+        self.emergency_override_session_override = if persisted { None } else { Some(enabled) };
+        persisted
+    }
+
+    fn is_admin_identity_authorized(&self, message: &InboundMessage) -> bool {
+        let channel_config = self.deps.runtime_config.channel_config.load();
+        admin_identity_matches_message(&channel_config.admin_identities, message)
+    }
+
+    fn has_admin_identities_configured(&self) -> bool {
+        !self
+            .deps
+            .runtime_config
+            .channel_config
+            .load()
+            .admin_identities
+            .is_empty()
+    }
+
+    fn redacted_persist_text(raw_text: &str) -> String {
+        redact_override_command(raw_text)
     }
 
     fn persist_inbound_user_message(
@@ -873,6 +968,11 @@ impl Channel {
                 } else {
                     "active"
                 };
+                let emergency_override = if self.emergency_override_mode {
+                    "on"
+                } else {
+                    "off"
+                };
                 let adapter = self.current_adapter().unwrap_or("unknown");
                 let body = format!(
                     "status\n\
@@ -880,6 +980,7 @@ impl Channel {
                      - channel: {}\n\
                      - adapter: {}\n\
                      - mode: {} (quiet => only command/@mention/reply-to-bot)\n\
+                     - emergency_override: {}\n\
                      - channel model: {}\n\
                      - branch model: {}\n\
                      - time: {}",
@@ -887,11 +988,104 @@ impl Channel {
                     self.id,
                     adapter,
                     mode,
+                    emergency_override,
                     channel_model,
                     branch_model,
                     now_line
                 );
                 self.send_builtin_text(body, "status").await;
+                return Ok(true);
+            }
+            "/override status" => {
+                let mode = if self.emergency_override_mode {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.send_builtin_text(format!("override mode: {mode}"), "override-status")
+                    .await;
+                return Ok(true);
+            }
+            "/override on" => {
+                if !self.has_admin_identities_configured() {
+                    self.send_builtin_text(
+                        "override unavailable: no admin identities configured.".to_string(),
+                        "override-on",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                if !self.is_admin_identity_authorized(message) {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        source = %message.source,
+                        adapter_key = %message.adapter_key(),
+                        sender_id = %message.sender_id,
+                        "unauthorized override on attempt"
+                    );
+                    self.send_builtin_text(
+                        "override denied: admin identity required.".to_string(),
+                        "override-on",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                let persisted = self.set_emergency_override_mode(true);
+                let body = if persisted {
+                    "override mode enabled.".to_string()
+                } else {
+                    "override mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                tracing::info!(
+                    channel_id = %self.id,
+                    source = %message.source,
+                    adapter_key = %message.adapter_key(),
+                    sender_id = %message.sender_id,
+                    persisted,
+                    "override mode enabled"
+                );
+                self.send_builtin_text(body, "override-on").await;
+                return Ok(true);
+            }
+            "/override off" => {
+                if !self.has_admin_identities_configured() {
+                    self.send_builtin_text(
+                        "override unavailable: no admin identities configured.".to_string(),
+                        "override-off",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                if !self.is_admin_identity_authorized(message) {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        source = %message.source,
+                        adapter_key = %message.adapter_key(),
+                        sender_id = %message.sender_id,
+                        "unauthorized override off attempt"
+                    );
+                    self.send_builtin_text(
+                        "override denied: admin identity required.".to_string(),
+                        "override-off",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                let persisted = self.set_emergency_override_mode(false);
+                let body = if persisted {
+                    "override mode disabled.".to_string()
+                } else {
+                    "override mode disabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                tracing::info!(
+                    channel_id = %self.id,
+                    source = %message.source,
+                    adapter_key = %message.adapter_key(),
+                    sender_id = %message.sender_id,
+                    persisted,
+                    "override mode disabled"
+                );
+                self.send_builtin_text(body, "override-off").await;
                 return Ok(true);
             }
             "/quiet" => {
@@ -924,6 +1118,7 @@ impl Channel {
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /quiet: listen-only mode".to_string(),
                     "- /active: normal reply mode".to_string(),
+                    "- /override status|on|off: emergency override mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
                 let body = lines.join("\n");
@@ -1168,6 +1363,7 @@ impl Channel {
     async fn handle_message_batch(&mut self, messages: Vec<InboundMessage>) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
         self.sync_listen_only_mode_from_runtime();
+        self.sync_emergency_override_mode_from_runtime();
 
         let message_count = messages.len();
         let batch_start_timestamp = messages
@@ -1334,7 +1530,7 @@ impl Channel {
                     &self.state.channel_id,
                     sender_name,
                     &message.sender_id,
-                    &raw_text,
+                    &Self::redacted_persist_text(&raw_text),
                     &metadata,
                 );
                 self.state
@@ -1560,6 +1756,7 @@ impl Channel {
     async fn handle_message(&mut self, message: InboundMessage) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
         self.sync_listen_only_mode_from_runtime();
+        self.sync_emergency_override_mode_from_runtime();
 
         // Track the inbound message that triggered this turn so outbound
         // responses carry the correct routing metadata (e.g. Slack thread_ts).
@@ -1647,7 +1844,8 @@ impl Channel {
             .as_ref()
             .map(|data| data.iter().map(|(meta, _)| meta.clone()).collect());
 
-        self.persist_inbound_user_message(&message, &raw_text, saved_metas.as_deref());
+        let redacted_raw_text = Self::redacted_persist_text(&raw_text);
+        self.persist_inbound_user_message(&message, &redacted_raw_text, saved_metas.as_deref());
 
         // Deterministic built-in command: bypass model output drift for agent identity checks.
         if message.source != "system" && raw_text.trim() == "/agent-id" {
@@ -2256,6 +2454,7 @@ impl Channel {
             allow_direct_reply,
             adapter.map(|s| s.to_string()),
             slack_thread_ts.as_deref(),
+            self.emergency_override_mode,
         )
         .await
         {
@@ -2371,8 +2570,13 @@ impl Channel {
             )
         };
 
-        if let Err(error) =
-            crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+        if let Err(error) = crate::tools::remove_channel_tools(
+            &self.tool_server,
+            allow_direct_reply,
+            &self.state,
+            self.emergency_override_mode,
+        )
+        .await
         {
             tracing::warn!(%error, "failed to remove channel tools");
         }
@@ -3255,6 +3459,39 @@ fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (
     (invoked_by_command, invoked_by_mention, invoked_by_reply)
 }
 
+fn admin_identity_matches_message(
+    admin_identities: &[ChannelAdminIdentity],
+    message: &InboundMessage,
+) -> bool {
+    let source = message.source.trim().to_ascii_lowercase();
+    let sender_id = message.sender_id.trim();
+    let adapter_selector = message.adapter_selector();
+    let adapter_key = message.adapter_key();
+
+    admin_identities.iter().any(|identity| {
+        if identity.source != source || identity.sender_id != sender_id {
+            return false;
+        }
+
+        match identity.adapter.as_deref() {
+            None => adapter_selector.is_none(),
+            Some(expected) => adapter_selector == Some(expected) || adapter_key == expected,
+        }
+    })
+}
+
+fn redact_override_command(raw_text: &str) -> String {
+    let trimmed = raw_text.trim();
+    if trimmed.eq_ignore_ascii_case("/override on")
+        || trimmed.eq_ignore_ascii_case("/override off")
+        || trimmed.eq_ignore_ascii_case("/override status")
+    {
+        "/override [redacted]".to_string()
+    } else {
+        raw_text.to_string()
+    }
+}
+
 fn looks_like_liveness_ping(text: &str) -> bool {
     let text = text.trim().to_lowercase();
     text.contains("you here")
@@ -3309,10 +3546,11 @@ fn should_send_quiet_mode_fallback(
 #[cfg(test)]
 mod tests {
     use super::{
-        QuietModeFallbackState, compute_listen_mode_invocation, recv_channel_event,
-        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
-        should_send_quiet_mode_fallback,
+        QuietModeFallbackState, admin_identity_matches_message, compute_listen_mode_invocation,
+        recv_channel_event, redact_override_command, should_process_event_for_channel,
+        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
+    use crate::config::ChannelAdminIdentity;
     use crate::memory::MemoryType;
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
     use std::collections::HashMap;
@@ -3340,6 +3578,58 @@ mod tests {
             metadata: message_metadata,
             formatted_author: None,
         }
+    }
+
+    #[test]
+    fn admin_identity_matches_named_adapter_sender_and_source() {
+        let message = InboundMessage {
+            adapter: Some("discord:work".into()),
+            sender_id: "123456789".into(),
+            ..inbound_message("discord", &[], "/override on")
+        };
+        let admins = vec![ChannelAdminIdentity {
+            source: "discord".to_string(),
+            adapter: Some("work".to_string()),
+            sender_id: "123456789".to_string(),
+        }];
+
+        assert!(admin_identity_matches_message(&admins, &message));
+    }
+
+    #[test]
+    fn admin_identity_rejects_wrong_adapter() {
+        let message = InboundMessage {
+            adapter: Some("discord:ops".into()),
+            sender_id: "123456789".into(),
+            ..inbound_message("discord", &[], "/override on")
+        };
+        let admins = vec![ChannelAdminIdentity {
+            source: "discord".to_string(),
+            adapter: Some("work".to_string()),
+            sender_id: "123456789".to_string(),
+        }];
+
+        assert!(!admin_identity_matches_message(&admins, &message));
+    }
+
+    #[test]
+    fn override_commands_are_redacted_for_persistence() {
+        assert_eq!(
+            redact_override_command("/override on"),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("/override off"),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("  /override status  "),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("/override maybe"),
+            "/override maybe".to_string()
+        );
     }
 
     #[tokio::test]

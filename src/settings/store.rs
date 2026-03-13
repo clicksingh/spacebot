@@ -14,6 +14,8 @@ pub const WORKER_LOG_MODE_KEY: &str = "worker_log_mode";
 /// Key for channel listen-only mode setting.
 pub const CHANNEL_LISTEN_ONLY_MODE_KEY: &str = "channel_listen_only_mode";
 const CHANNEL_LISTEN_ONLY_MODE_PREFIX: &str = "channel_listen_only_mode:";
+/// Key prefix for channel emergency override mode setting.
+const CHANNEL_EMERGENCY_OVERRIDE_MODE_PREFIX: &str = "channel_emergency_override_mode:";
 const PROMPT_CAPTURE_PREFIX: &str = "prompt_capture:";
 
 /// How worker execution logs are stored.
@@ -60,6 +62,9 @@ pub struct SettingsStore {
 impl SettingsStore {
     fn channel_listen_only_mode_key(channel_id: &str) -> String {
         format!("{CHANNEL_LISTEN_ONLY_MODE_PREFIX}{channel_id}")
+    }
+    fn channel_emergency_override_mode_key(channel_id: &str) -> String {
+        format!("{CHANNEL_EMERGENCY_OVERRIDE_MODE_PREFIX}{channel_id}")
     }
     /// Create a new settings store at the given path.
     /// The database will be created if it doesn't exist.
@@ -216,6 +221,35 @@ impl SettingsStore {
     /// Persist listen-only mode for a specific channel.
     pub fn set_channel_listen_only_mode_for(&self, channel_id: &str, enabled: bool) -> Result<()> {
         let key = Self::channel_listen_only_mode_key(channel_id);
+        self.set_raw(&key, if enabled { "true" } else { "false" })
+    }
+
+    /// Get emergency override mode for a specific channel, if explicitly persisted.
+    pub fn channel_emergency_override_mode_for(&self, channel_id: &str) -> Result<Option<bool>> {
+        let key = Self::channel_emergency_override_mode_key(channel_id);
+        match self.get_raw(&key) {
+            Ok(raw) => raw.parse::<bool>().map(Some).map_err(|error| {
+                SettingsError::ReadFailed {
+                    key: key.clone(),
+                    details: format!("invalid boolean value '{raw}': {error}"),
+                }
+                .into()
+            }),
+            Err(crate::error::Error::Settings(settings_error)) => match *settings_error {
+                SettingsError::NotFound { .. } => Ok(None),
+                other => Err(other.into()),
+            },
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Persist emergency override mode for a specific channel.
+    pub fn set_channel_emergency_override_mode_for(
+        &self,
+        channel_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let key = Self::channel_emergency_override_mode_key(channel_id);
         self.set_raw(&key, if enabled { "true" } else { "false" })
     }
 

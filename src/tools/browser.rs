@@ -2143,6 +2143,109 @@ pub fn register_browser_tools(
         .tool(BrowserCloseTool { context })
 }
 
+fn build_browser_context(
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    runtime_config: &crate::config::RuntimeConfig,
+) -> BrowserContext {
+    let state = if let Some(shared) = runtime_config
+        .shared_browser
+        .as_ref()
+        .filter(|_| config.persist_session)
+    {
+        shared.clone()
+    } else {
+        Arc::new(Mutex::new(BrowserState::new()))
+    };
+
+    let secrets = runtime_config.secrets.load().as_ref().as_ref().cloned();
+    BrowserContext::new(state, config, screenshot_dir, secrets)
+}
+
+/// Add all browser tools to an existing running tool server handle.
+pub async fn add_browser_tools_to_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    runtime_config: &crate::config::RuntimeConfig,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let context = build_browser_context(config, screenshot_dir, runtime_config);
+
+    handle
+        .add_tool(BrowserLaunchTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserNavigateTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserSnapshotTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserClickTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserTypeTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserPressKeyTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserScreenshotTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserEvaluateTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserTabOpenTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserTabListTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(BrowserTabCloseTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle.add_tool(BrowserCloseTool { context }).await?;
+    Ok(())
+}
+
+/// Remove all browser tools from an existing running tool server handle.
+pub async fn remove_browser_tools_from_handle(handle: &rig::tool::server::ToolServerHandle) {
+    let _ = handle.remove_tool(BrowserLaunchTool::NAME).await;
+    let _ = handle.remove_tool(BrowserNavigateTool::NAME).await;
+    let _ = handle.remove_tool(BrowserSnapshotTool::NAME).await;
+    let _ = handle.remove_tool(BrowserClickTool::NAME).await;
+    let _ = handle.remove_tool(BrowserTypeTool::NAME).await;
+    let _ = handle.remove_tool(BrowserPressKeyTool::NAME).await;
+    let _ = handle.remove_tool(BrowserScreenshotTool::NAME).await;
+    let _ = handle.remove_tool(BrowserEvaluateTool::NAME).await;
+    let _ = handle.remove_tool(BrowserTabOpenTool::NAME).await;
+    let _ = handle.remove_tool(BrowserTabListTool::NAME).await;
+    let _ = handle.remove_tool(BrowserTabCloseTool::NAME).await;
+    let _ = handle.remove_tool(BrowserCloseTool::NAME).await;
+}
+
 // Shared helpers
 
 /// Get the active page, or create a first one if the browser has no pages yet.

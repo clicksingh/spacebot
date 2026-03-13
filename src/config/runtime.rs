@@ -111,7 +111,7 @@ impl RuntimeConfig {
             memory_persistence: ArcSwap::from_pointee(agent_config.memory_persistence),
             coalesce: ArcSwap::from_pointee(agent_config.coalesce),
             ingestion: ArcSwap::from_pointee(agent_config.ingestion),
-            channel_config: ArcSwap::from_pointee(agent_config.channel),
+            channel_config: ArcSwap::from_pointee(agent_config.channel.clone()),
             max_turns: ArcSwap::from_pointee(agent_config.max_turns),
             branch_max_turns: ArcSwap::from_pointee(agent_config.branch_max_turns),
             context_window: ArcSwap::from_pointee(agent_config.context_window),
@@ -172,7 +172,7 @@ impl RuntimeConfig {
             match settings.channel_listen_only_mode() {
                 Ok(Some(enabled)) => {
                     self.channel_config.rcu(move |current| {
-                        let mut next = **current;
+                        let mut next = current.as_ref().clone();
                         next.listen_only_mode = enabled;
                         Arc::new(next)
                     });
@@ -236,7 +236,10 @@ impl RuntimeConfig {
         self.coalesce.store(Arc::new(resolved.coalesce));
         self.ingestion.store(Arc::new(resolved.ingestion));
         let resolved_channel = resolved.channel;
-        let configured_listen_only = agent.channel.map(|channel| channel.listen_only_mode);
+        let configured_listen_only = agent
+            .channel
+            .as_ref()
+            .map(|channel| channel.listen_only_mode);
         self.channel_listen_only_explicit
             .store(Arc::new(configured_listen_only));
         let persisted_listen_only = self.settings.load().as_ref().as_ref().and_then(|settings| {
@@ -252,7 +255,7 @@ impl RuntimeConfig {
             }
         });
         self.channel_config.rcu(move |current| {
-            let mut next = resolved_channel;
+            let mut next = resolved_channel.clone();
             next.listen_only_mode = configured_listen_only
                 .or(persisted_listen_only)
                 .unwrap_or(current.as_ref().listen_only_mode);

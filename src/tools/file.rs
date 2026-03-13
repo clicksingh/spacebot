@@ -605,6 +605,35 @@ pub fn register_file_tools(
         .tool(FileListTool { context })
 }
 
+/// Add all file tools to an existing `ToolServerHandle`.
+///
+/// Used by channel emergency override mode where tools are mounted dynamically
+/// per turn on an already-running tool server.
+pub async fn add_file_tools_to_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+    workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let context = FileContext::new(workspace, sandbox);
+    handle
+        .add_tool(FileReadTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(FileWriteTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle
+        .add_tool(FileEditTool {
+            context: context.clone(),
+        })
+        .await?;
+    handle.add_tool(FileListTool { context }).await?;
+    Ok(())
+}
+
 // Legacy types (used by system-internal callers)
 
 /// File entry metadata (legacy).

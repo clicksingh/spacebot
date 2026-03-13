@@ -76,8 +76,8 @@ pub use attachment_recall::{
 };
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
 pub use browser::{
-    BrowserError, BrowserOutput, SharedBrowserHandle, TabInfo, new_shared_browser_handle,
-    register_browser_tools,
+    BrowserError, BrowserOutput, SharedBrowserHandle, TabInfo, add_browser_tools_to_handle,
+    new_shared_browser_handle, register_browser_tools, remove_browser_tools_from_handle,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
@@ -91,7 +91,7 @@ pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, Ema
 pub use file::{
     FileEditArgs, FileEditTool, FileEntry, FileEntryOutput, FileError, FileListArgs, FileListTool,
     FileOutput, FileReadArgs, FileReadTool, FileType, FileWriteArgs, FileWriteTool,
-    register_file_tools,
+    add_file_tools_to_handle, register_file_tools,
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
@@ -357,6 +357,7 @@ pub async fn add_channel_tools(
     allow_direct_reply: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
+    emergency_override_mode: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -426,7 +427,7 @@ pub async fn add_channel_tools(
             ))
             .await?;
     }
-    handle.add_tool(CancelTool::new(state)).await?;
+    handle.add_tool(CancelTool::new(state.clone())).await?;
     handle
         .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
         .await?;
@@ -440,6 +441,113 @@ pub async fn add_channel_tools(
     if let Some(mut agent_msg) = send_agent_message_tool {
         agent_msg = agent_msg.with_skip_flag(skip_flag.clone());
         handle.add_tool(agent_msg).await?;
+    }
+    if emergency_override_mode {
+        add_emergency_channel_tools(handle, &state).await?;
+    }
+    Ok(())
+}
+
+async fn add_emergency_channel_tools(
+    handle: &ToolServerHandle,
+    state: &ChannelState,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    handle.add_tool(SpacebotDocsTool::new()).await?;
+    handle
+        .add_tool(MemorySaveTool::new(state.deps.memory_search.clone()))
+        .await?;
+    handle
+        .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
+        .await?;
+    handle
+        .add_tool(MemoryDeleteTool::new(state.deps.memory_search.clone()))
+        .await?;
+    handle
+        .add_tool(ChannelRecallTool::new(
+            state.conversation_logger.clone(),
+            state.channel_store.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(EmailSearchTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    handle
+        .add_tool(WorkerInspectTool::new(
+            state.process_run_logger.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+    handle
+        .add_tool(TaskCreateTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+            "channel",
+        ))
+        .await?;
+    handle
+        .add_tool(TaskListTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+    handle
+        .add_tool(TaskUpdateTool::for_branch(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(ShellTool::new(
+            state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(ReadSkillTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    add_file_tools_to_handle(
+        handle,
+        state.deps.runtime_config.workspace_dir.clone(),
+        state.deps.sandbox.clone(),
+    )
+    .await?;
+
+    if let Some(store) = state.deps.runtime_config.secrets.load().as_ref() {
+        handle.add_tool(SecretSetTool::new(store.clone())).await?;
+    }
+
+    let browser_config = state
+        .deps
+        .runtime_config
+        .browser_config
+        .load()
+        .as_ref()
+        .clone();
+    if browser_config.enabled {
+        add_browser_tools_to_handle(
+            handle,
+            browser_config,
+            state.screenshot_dir.clone(),
+            state.deps.runtime_config.as_ref(),
+        )
+        .await?;
+    }
+
+    if let Some(key) = state
+        .deps
+        .runtime_config
+        .brave_search_key
+        .load()
+        .as_ref()
+        .as_ref()
+        .cloned()
+    {
+        handle.add_tool(WebSearchTool::new(key)).await?;
+    }
+
+    let mcp_tools = state.deps.mcp_manager.get_tools().await;
+    for mcp_tool in mcp_tools {
+        handle.add_tool(mcp_tool).await?;
     }
     Ok(())
 }
@@ -476,6 +584,8 @@ fn default_delivery_target_for_conversation(
 pub async fn remove_channel_tools(
     handle: &ToolServerHandle,
     allow_direct_reply: bool,
+    state: &ChannelState,
+    emergency_override_mode: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     if allow_direct_reply {
         handle.remove_tool(ReplyTool::NAME).await?;
@@ -494,7 +604,37 @@ pub async fn remove_channel_tools(
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
+    if emergency_override_mode {
+        remove_emergency_channel_tools(handle, state).await;
+    }
     Ok(())
+}
+
+async fn remove_emergency_channel_tools(handle: &ToolServerHandle, state: &ChannelState) {
+    let _ = handle.remove_tool(SpacebotDocsTool::NAME).await;
+    let _ = handle.remove_tool(MemorySaveTool::NAME).await;
+    let _ = handle.remove_tool(MemoryRecallTool::NAME).await;
+    let _ = handle.remove_tool(MemoryDeleteTool::NAME).await;
+    let _ = handle.remove_tool(ChannelRecallTool::NAME).await;
+    let _ = handle.remove_tool(EmailSearchTool::NAME).await;
+    let _ = handle.remove_tool(WorkerInspectTool::NAME).await;
+    let _ = handle.remove_tool(TaskCreateTool::NAME).await;
+    let _ = handle.remove_tool(TaskListTool::NAME).await;
+    let _ = handle.remove_tool(TaskUpdateTool::NAME).await;
+    let _ = handle.remove_tool(ShellTool::NAME).await;
+    let _ = handle.remove_tool(ReadSkillTool::NAME).await;
+    let _ = handle.remove_tool(FileReadTool::NAME).await;
+    let _ = handle.remove_tool(FileWriteTool::NAME).await;
+    let _ = handle.remove_tool(FileEditTool::NAME).await;
+    let _ = handle.remove_tool(FileListTool::NAME).await;
+    let _ = handle.remove_tool(SecretSetTool::NAME).await;
+    let _ = handle.remove_tool(WebSearchTool::NAME).await;
+    remove_browser_tools_from_handle(handle).await;
+
+    // MCP tool names are dynamic; remove current connected set best-effort.
+    for mcp_tool in state.deps.mcp_manager.get_tools().await {
+        let _ = handle.remove_tool(&mcp_tool.name()).await;
+    }
 }
 
 fn memory_save_with_events(
