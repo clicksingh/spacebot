@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
 import {useWebChat} from "@/hooks/useWebChat";
 import {
@@ -9,7 +9,7 @@ import {
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair} from "@/components/ToolCall";
-import {type TimelineBranchRun, type TimelineWorkerRun} from "@/api/client";
+import {type TimelineBranchRun, type TimelineItem, type TimelineWorkerRun} from "@/api/client";
 
 interface WebChatPanelProps {
 	agentId: string;
@@ -191,6 +191,77 @@ function ThinkingIndicator() {
 	);
 }
 
+type OverrideMode = "on" | "off" | "unknown";
+
+function OverrideControls({
+	mode,
+	onEnable,
+	onDisable,
+	onRefresh,
+	busy,
+	disabled,
+}: {
+	mode: OverrideMode;
+	onEnable: () => void;
+	onDisable: () => void;
+	onRefresh: () => void;
+	busy: boolean;
+	disabled: boolean;
+}) {
+	const dotClass = mode === "on"
+		? "bg-emerald-400"
+		: mode === "off"
+			? "bg-ink-faint"
+			: "bg-amber-400";
+	const label = mode === "on" ? "On" : mode === "off" ? "Off" : "Unknown";
+	const controlsDisabled = disabled || busy;
+
+	return (
+		<div className="rounded-lg border border-app-line/60 bg-app-box/40 px-3 py-2 backdrop-blur-sm">
+			<div className="flex flex-wrap items-center gap-2 text-tiny">
+				<div className="flex items-center gap-1.5 text-ink-dull">
+					<div className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+					<span>Override: {label}</span>
+				</div>
+				<div className="ml-auto flex items-center gap-1.5">
+					<button
+						type="button"
+						onClick={onRefresh}
+						disabled={controlsDisabled}
+						className="rounded border border-app-line/70 px-2 py-1 text-ink-faint transition-colors hover:bg-app-hover disabled:opacity-40"
+					>
+						Check
+					</button>
+					<button
+						type="button"
+						onClick={onEnable}
+						disabled={controlsDisabled}
+						className={`rounded border px-2 py-1 transition-colors disabled:opacity-40 ${
+							mode === "on"
+								? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200"
+								: "border-app-line/70 text-ink-faint hover:bg-app-hover"
+						}`}
+					>
+						On
+					</button>
+					<button
+						type="button"
+						onClick={onDisable}
+						disabled={controlsDisabled}
+						className={`rounded border px-2 py-1 transition-colors disabled:opacity-40 ${
+							mode === "off"
+								? "border-ink-faint/60 bg-app-hover text-ink"
+								: "border-app-line/70 text-ink-faint hover:bg-app-hover"
+						}`}
+					>
+						Off
+					</button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 function FloatingChatInput({
 	value,
 	onChange,
@@ -275,10 +346,23 @@ function tryParseJson(text: string): Record<string, unknown> | null {
 	}
 }
 
+function detectOverrideModeFromTimeline(timeline: TimelineItem[]): OverrideMode {
+	for (let index = timeline.length - 1; index >= 0; index -= 1) {
+		const item = timeline[index];
+		if (item.type !== "message" || item.role !== "assistant") continue;
+		const text = item.content.toLowerCase();
+		if (text.includes("override mode: on") || text.includes("override mode enabled")) return "on";
+		if (text.includes("override mode: off") || text.includes("override mode disabled")) return "off";
+	}
+	return "unknown";
+}
+
 export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
 	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
+	const [overrideMode, setOverrideMode] = useState<OverrideMode>("unknown");
+	const [overrideBusy, setOverrideBusy] = useState(false);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
 	const liveState = liveStates[sessionId];
@@ -287,6 +371,13 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const execution = liveState?.channelExecution;
 	const hasActiveWorkers = activeWorkers.length > 0;
+	const inferredOverrideMode = useMemo(() => detectOverrideModeFromTimeline(timeline), [timeline]);
+
+	useEffect(() => {
+		if (inferredOverrideMode !== "unknown") {
+			setOverrideMode(inferredOverrideMode);
+		}
+	}, [inferredOverrideMode]);
 
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
@@ -299,15 +390,40 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 		sendMessage(trimmed);
 	};
 
+	const sendOverrideCommand = async (command: "/override status" | "/override on" | "/override off", optimistic?: OverrideMode) => {
+		if (isSending || overrideBusy) return;
+		if (optimistic) {
+			setOverrideMode(optimistic);
+		}
+		setOverrideBusy(true);
+		try {
+			await sendMessage(command);
+		} finally {
+			setOverrideBusy(false);
+		}
+	};
+
 	return (
 		<div className="relative flex h-full w-full flex-col">
 			<div className="flex-1 overflow-x-hidden overflow-y-auto">
 				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
-					{hasActiveWorkers && (
-						<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
-							<ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />
-						</div>
-					)}
+					<div className="sticky top-0 z-10 flex flex-col gap-2 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
+						<OverrideControls
+							mode={overrideMode}
+							onEnable={() => {
+								void sendOverrideCommand("/override on", "on");
+							}}
+							onDisable={() => {
+								void sendOverrideCommand("/override off", "off");
+							}}
+							onRefresh={() => {
+								void sendOverrideCommand("/override status");
+							}}
+							busy={overrideBusy}
+							disabled={isSending || isTyping}
+						/>
+						{hasActiveWorkers && <ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />}
+					</div>
 
 					{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
 						<ChannelExecutionPanel execution={execution} isTyping={isTyping} />

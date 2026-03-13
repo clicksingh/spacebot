@@ -945,7 +945,7 @@ impl Channel {
         }
         let supported_source = matches!(
             message.source.as_str(),
-            "telegram" | "discord" | "slack" | "twitch" | "signal"
+            "telegram" | "discord" | "slack" | "twitch" | "signal" | "webchat"
         );
         if !supported_source {
             return Ok(false);
