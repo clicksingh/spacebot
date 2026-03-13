@@ -452,68 +452,167 @@ async fn add_emergency_channel_tools(
     handle: &ToolServerHandle,
     state: &ChannelState,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.add_tool(SpacebotDocsTool::new()).await?;
-    handle
+    async fn rollback_emergency_tools(
+        handle: &ToolServerHandle,
+        state: &ChannelState,
+        names: &[String],
+    ) {
+        for name in names.iter().rev() {
+            if let Err(error) = handle.remove_tool(name).await {
+                tracing::warn!(%error, tool_name = %name, "failed to roll back emergency tool");
+            }
+        }
+        let mut snapshot = state.emergency_mcp_tool_names.write().await;
+        snapshot.clear();
+    }
+
+    let mut added_tool_names: Vec<String> = Vec::new();
+
+    if let Err(error) = handle.add_tool(SpacebotDocsTool::new()).await {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(SpacebotDocsTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(MemorySaveTool::new(state.deps.memory_search.clone()))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(MemorySaveTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(MemoryRecallTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(MemoryDeleteTool::new(state.deps.memory_search.clone()))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(MemoryDeleteTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(ChannelRecallTool::new(
             state.conversation_logger.clone(),
             state.channel_store.clone(),
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(ChannelRecallTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(EmailSearchTool::new(state.deps.runtime_config.clone()))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(EmailSearchTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(WorkerInspectTool::new(
             state.process_run_logger.clone(),
             state.deps.agent_id.to_string(),
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(WorkerInspectTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(TaskCreateTool::new(
             state.deps.task_store.clone(),
             state.deps.agent_id.to_string(),
             "channel",
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(TaskCreateTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(TaskListTool::new(
             state.deps.task_store.clone(),
             state.deps.agent_id.to_string(),
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(TaskListTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(TaskUpdateTool::for_branch(
             state.deps.task_store.clone(),
             state.deps.agent_id.clone(),
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(TaskUpdateTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(ShellTool::new(
             state.deps.runtime_config.workspace_dir.clone(),
             state.deps.sandbox.clone(),
         ))
-        .await?;
-    handle
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(ShellTool::NAME.to_string());
+
+    if let Err(error) = handle
         .add_tool(ReadSkillTool::new(state.deps.runtime_config.clone()))
-        .await?;
-    add_file_tools_to_handle(
+        .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(ReadSkillTool::NAME.to_string());
+
+    if let Err(error) = add_file_tools_to_handle(
         handle,
         state.deps.runtime_config.workspace_dir.clone(),
         state.deps.sandbox.clone(),
     )
-    .await?;
+    .await
+    {
+        rollback_emergency_tools(handle, state, &added_tool_names).await;
+        return Err(error);
+    }
+    added_tool_names.push(FileReadTool::NAME.to_string());
+    added_tool_names.push(FileWriteTool::NAME.to_string());
+    added_tool_names.push(FileEditTool::NAME.to_string());
+    added_tool_names.push(FileListTool::NAME.to_string());
 
     if let Some(store) = state.deps.runtime_config.secrets.load().as_ref() {
-        handle.add_tool(SecretSetTool::new(store.clone())).await?;
+        if let Err(error) = handle.add_tool(SecretSetTool::new(store.clone())).await {
+            rollback_emergency_tools(handle, state, &added_tool_names).await;
+            return Err(error);
+        }
+        added_tool_names.push(SecretSetTool::NAME.to_string());
     }
 
     let browser_config = state
@@ -524,13 +623,29 @@ async fn add_emergency_channel_tools(
         .as_ref()
         .clone();
     if browser_config.enabled {
-        add_browser_tools_to_handle(
+        if let Err(error) = add_browser_tools_to_handle(
             handle,
             browser_config,
             state.screenshot_dir.clone(),
             state.deps.runtime_config.as_ref(),
         )
-        .await?;
+        .await
+        {
+            rollback_emergency_tools(handle, state, &added_tool_names).await;
+            return Err(error);
+        }
+        added_tool_names.push("browser_launch".to_string());
+        added_tool_names.push("browser_navigate".to_string());
+        added_tool_names.push("browser_snapshot".to_string());
+        added_tool_names.push("browser_click".to_string());
+        added_tool_names.push("browser_type".to_string());
+        added_tool_names.push("browser_press_key".to_string());
+        added_tool_names.push("browser_screenshot".to_string());
+        added_tool_names.push("browser_evaluate".to_string());
+        added_tool_names.push("browser_tab_open".to_string());
+        added_tool_names.push("browser_tab_list".to_string());
+        added_tool_names.push("browser_tab_close".to_string());
+        added_tool_names.push("browser_close".to_string());
     }
 
     if let Some(key) = state
@@ -542,16 +657,25 @@ async fn add_emergency_channel_tools(
         .as_ref()
         .cloned()
     {
-        handle.add_tool(WebSearchTool::new(key)).await?;
+        if let Err(error) = handle.add_tool(WebSearchTool::new(key)).await {
+            rollback_emergency_tools(handle, state, &added_tool_names).await;
+            return Err(error);
+        }
+        added_tool_names.push(WebSearchTool::NAME.to_string());
     }
 
     let mcp_tools = state.deps.mcp_manager.get_tools().await;
     let mut mounted_mcp_tool_names = Vec::new();
     for mcp_tool in mcp_tools {
         let tool_name = mcp_tool.name();
-        handle.add_tool(mcp_tool).await?;
+        if let Err(error) = handle.add_tool(mcp_tool).await {
+            rollback_emergency_tools(handle, state, &added_tool_names).await;
+            return Err(error);
+        }
+        added_tool_names.push(tool_name.clone());
         mounted_mcp_tool_names.push(tool_name);
     }
+
     let mut snapshot = state.emergency_mcp_tool_names.write().await;
     *snapshot = mounted_mcp_tool_names.into_iter().collect();
     Ok(())
@@ -610,9 +734,7 @@ pub async fn remove_channel_tools(
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
     if emergency_override_mode {
-        if let Err(error) = remove_emergency_channel_tools(handle, state).await {
-            tracing::warn!(%error, "failed to fully remove emergency channel tools");
-        }
+        remove_emergency_channel_tools(handle, state).await?;
     }
     Ok(())
 }

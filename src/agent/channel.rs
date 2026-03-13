@@ -1020,8 +1020,6 @@ impl Channel {
                     tracing::warn!(
                         channel_id = %self.id,
                         source = %message.source,
-                        adapter_key = %message.adapter_key(),
-                        sender_id = %message.sender_id,
                         "unauthorized override on attempt"
                     );
                     self.send_builtin_text(
@@ -1040,8 +1038,6 @@ impl Channel {
                 tracing::info!(
                     channel_id = %self.id,
                     source = %message.source,
-                    adapter_key = %message.adapter_key(),
-                    sender_id = %message.sender_id,
                     persisted,
                     "override mode enabled"
                 );
@@ -1061,8 +1057,6 @@ impl Channel {
                     tracing::warn!(
                         channel_id = %self.id,
                         source = %message.source,
-                        adapter_key = %message.adapter_key(),
-                        sender_id = %message.sender_id,
                         "unauthorized override off attempt"
                     );
                     self.send_builtin_text(
@@ -1081,8 +1075,6 @@ impl Channel {
                 tracing::info!(
                     channel_id = %self.id,
                     source = %message.source,
-                    adapter_key = %message.adapter_key(),
-                    sender_id = %message.sender_id,
                     persisted,
                     "override mode disabled"
                 );
@@ -2463,113 +2455,121 @@ impl Channel {
             return Err(AgentError::Other(error.into()).into());
         }
 
-        let rc = &self.deps.runtime_config;
-        let routing = rc.routing.load();
-        let max_turns = if is_retrigger {
-            RETRIGGER_MAX_TURNS
-        } else {
-            **rc.max_turns.load()
-        };
-        let model_name = routing.resolve(ProcessType::Channel, None);
-        let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
-            .with_context(&*self.deps.agent_id, "channel")
-            .with_routing((**routing).clone());
+        let turn_result: Result<(
+            std::result::Result<String, rig::completion::PromptError>,
+            bool,
+        )> = async {
+            let rc = &self.deps.runtime_config;
+            let routing = rc.routing.load();
+            let max_turns = if is_retrigger {
+                RETRIGGER_MAX_TURNS
+            } else {
+                **rc.max_turns.load()
+            };
+            let model_name = routing.resolve(ProcessType::Channel, None);
+            let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
+                .with_context(&*self.deps.agent_id, "channel")
+                .with_routing((**routing).clone());
 
-        let agent = AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .default_max_turns(max_turns)
-            .tool_server_handle(self.tool_server.clone())
-            .build();
+            let agent = AgentBuilder::new(model)
+                .preamble(system_prompt)
+                .default_max_turns(max_turns)
+                .tool_server_handle(self.tool_server.clone())
+                .build();
 
-        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
-            .await
-            .ok();
+            self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+                .await
+                .ok();
 
-        // Inject attachments as a user message before the text prompt
-        if !attachment_content.is_empty() {
-            let mut history = self.state.history.write().await;
-            let content = OneOrMany::many(attachment_content).unwrap_or_else(|_| {
-                OneOrMany::one(UserContent::text("[attachment processing failed]"))
-            });
-            history.push(rig::message::Message::User { content });
-            drop(history);
-        }
-
-        // For retrigger turns, inject a synthetic assistant acknowledgment so the
-        // LLM sees proper user/assistant role alternation. Without this, the API
-        // receives back-to-back user messages (the original user prompt preserved
-        // from the prior turn + the retrigger system message), which causes some
-        // models to return empty responses or get confused about whose turn it is.
-        if is_retrigger {
-            let mut history = self.state.history.write().await;
-            // Only inject if the last message is a user message (avoid double-stacking
-            // if history already ends with an assistant message).
-            let needs_bridge = history
-                .last()
-                .is_some_and(|m| matches!(m, rig::message::Message::User { .. }));
-            if needs_bridge {
-                history.push(rig::message::Message::Assistant {
-                    id: None,
-                    content: OneOrMany::one(rig::message::AssistantContent::text(
-                        "[acknowledged — working on it in background]",
-                    )),
+            // Inject attachments as a user message before the text prompt
+            if !attachment_content.is_empty() {
+                let mut history = self.state.history.write().await;
+                let content = OneOrMany::many(attachment_content).unwrap_or_else(|_| {
+                    OneOrMany::one(UserContent::text("[attachment processing failed]"))
                 });
-            }
-            drop(history);
-        }
-
-        // Clone history out so the write lock is released before the agentic loop.
-        // The branch tool needs a read lock on history to clone it for the branch,
-        // and holding a write lock across the entire agentic loop would deadlock.
-        let mut history = {
-            let guard = self.state.history.read().await;
-            guard.clone()
-        };
-        let history_len_before = history.len();
-
-        // ── Prompt snapshot capture (fire-and-forget) ──
-        self.maybe_capture_snapshot(system_prompt, user_text, &history);
-
-        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
-
-        // If the LLM responded with text that looks like tool call syntax, it failed
-        // to use the tool calling API. Inject a correction and retry a couple
-        // times so the model can recover by calling `reply` or `skip`.
-        const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
-        let mut recovery_attempts = 0;
-        while let Ok(ref response) = result {
-            if !crate::tools::should_block_user_visible_text(response)
-                || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
-            {
-                break;
+                history.push(rig::message::Message::User { content });
+                drop(history);
             }
 
-            recovery_attempts += 1;
-            tracing::warn!(
-                channel_id = %self.id,
-                attempt = recovery_attempts,
-                "LLM emitted blocked structured output, retrying with correction"
-            );
+            // For retrigger turns, inject a synthetic assistant acknowledgment so the
+            // LLM sees proper user/assistant role alternation. Without this, the API
+            // receives back-to-back user messages (the original user prompt preserved
+            // from the prior turn + the retrigger system message), which causes some
+            // models to return empty responses or get confused about whose turn it is.
+            if is_retrigger {
+                let mut history = self.state.history.write().await;
+                // Only inject if the last message is a user message (avoid double-stacking
+                // if history already ends with an assistant message).
+                let needs_bridge = history
+                    .last()
+                    .is_some_and(|m| matches!(m, rig::message::Message::User { .. }));
+                if needs_bridge {
+                    history.push(rig::message::Message::Assistant {
+                        id: None,
+                        content: OneOrMany::one(rig::message::AssistantContent::text(
+                            "[acknowledged — working on it in background]",
+                        )),
+                    });
+                }
+                drop(history);
+            }
 
-            let prompt_engine = self.deps.runtime_config.prompts.load();
-            let correction = prompt_engine.render_system_tool_syntax_correction()?;
-            result = self
-                .hook
-                .prompt_once(&agent, &mut history, &correction)
-                .await;
+            // Clone history out so the write lock is released before the agentic loop.
+            // The branch tool needs a read lock on history to clone it for the branch,
+            // and holding a write lock across the entire agentic loop would deadlock.
+            let mut history = {
+                let guard = self.state.history.read().await;
+                guard.clone()
+            };
+            let history_len_before = history.len();
+
+            // ── Prompt snapshot capture (fire-and-forget) ──
+            self.maybe_capture_snapshot(system_prompt, user_text, &history);
+
+            let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+
+            // If the LLM responded with text that looks like tool call syntax, it failed
+            // to use the tool calling API. Inject a correction and retry a couple
+            // times so the model can recover by calling `reply` or `skip`.
+            const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
+            let mut recovery_attempts = 0;
+            while let Ok(ref response) = result {
+                if !crate::tools::should_block_user_visible_text(response)
+                    || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
+                {
+                    break;
+                }
+
+                recovery_attempts += 1;
+                tracing::warn!(
+                    channel_id = %self.id,
+                    attempt = recovery_attempts,
+                    "LLM emitted blocked structured output, retrying with correction"
+                );
+
+                let prompt_engine = self.deps.runtime_config.prompts.load();
+                let correction = prompt_engine.render_system_tool_syntax_correction()?;
+                result = self
+                    .hook
+                    .prompt_once(&agent, &mut history, &correction)
+                    .await;
+            }
+
+            let retrigger_reply_preserved = {
+                let mut guard = self.state.history.write().await;
+                apply_history_after_turn(
+                    &result,
+                    &mut guard,
+                    history,
+                    history_len_before,
+                    &self.id,
+                    is_retrigger,
+                )
+            };
+
+            Ok((result, retrigger_reply_preserved))
         }
-
-        let retrigger_reply_preserved = {
-            let mut guard = self.state.history.write().await;
-            apply_history_after_turn(
-                &result,
-                &mut guard,
-                history,
-                history_len_before,
-                &self.id,
-                is_retrigger,
-            )
-        };
+        .await;
 
         if let Err(error) = crate::tools::remove_channel_tools(
             &self.tool_server,
@@ -2582,6 +2582,7 @@ impl Channel {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
+        let (result, retrigger_reply_preserved) = turn_result?;
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
