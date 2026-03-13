@@ -634,18 +634,18 @@ async fn add_emergency_channel_tools(
             rollback_emergency_tools(handle, state, &added_tool_names).await;
             return Err(error);
         }
-        added_tool_names.push("browser_launch".to_string());
-        added_tool_names.push("browser_navigate".to_string());
-        added_tool_names.push("browser_snapshot".to_string());
-        added_tool_names.push("browser_click".to_string());
-        added_tool_names.push("browser_type".to_string());
-        added_tool_names.push("browser_press_key".to_string());
-        added_tool_names.push("browser_screenshot".to_string());
-        added_tool_names.push("browser_evaluate".to_string());
-        added_tool_names.push("browser_tab_open".to_string());
-        added_tool_names.push("browser_tab_list".to_string());
-        added_tool_names.push("browser_tab_close".to_string());
-        added_tool_names.push("browser_close".to_string());
+        added_tool_names.push(browser::BrowserLaunchTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserNavigateTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserSnapshotTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserClickTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserTypeTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserPressKeyTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserScreenshotTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserEvaluateTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserTabOpenTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserTabListTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserTabCloseTool::NAME.to_string());
+        added_tool_names.push(browser::BrowserCloseTool::NAME.to_string());
     }
 
     if let Some(key) = state
