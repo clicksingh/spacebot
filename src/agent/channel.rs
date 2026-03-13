@@ -785,10 +785,6 @@ impl Channel {
             .is_empty()
     }
 
-    fn redacted_persist_text(raw_text: &str) -> String {
-        redact_override_command(raw_text)
-    }
-
     fn persist_inbound_user_message(
         &self,
         message: &InboundMessage,
@@ -1530,7 +1526,7 @@ impl Channel {
                     &self.state.channel_id,
                     sender_name,
                     &message.sender_id,
-                    &Self::redacted_persist_text(&raw_text),
+                    &redact_override_command(&raw_text),
                     &metadata,
                 );
                 self.state
@@ -1844,7 +1840,7 @@ impl Channel {
             .as_ref()
             .map(|data| data.iter().map(|(meta, _)| meta.clone()).collect());
 
-        let redacted_raw_text = Self::redacted_persist_text(&raw_text);
+        let redacted_raw_text = redact_override_command(&raw_text);
         self.persist_inbound_user_message(&message, &redacted_raw_text, saved_metas.as_deref());
 
         // Deterministic built-in command: bypass model output drift for agent identity checks.

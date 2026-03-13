@@ -614,23 +614,54 @@ pub async fn add_file_tools_to_handle(
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
+    async fn rollback_file_tools(handle: &rig::tool::server::ToolServerHandle, names: &[&str]) {
+        for name in names.iter().rev() {
+            if let Err(error) = handle.remove_tool(name).await {
+                tracing::warn!(%error, tool_name = %name, "failed to roll back file tool");
+            }
+        }
+    }
+
     let context = FileContext::new(workspace, sandbox);
-    handle
+    let mut added_tools: Vec<&str> = Vec::new();
+
+    if let Err(error) = handle
         .add_tool(FileReadTool {
             context: context.clone(),
         })
-        .await?;
-    handle
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileReadTool::NAME);
+
+    if let Err(error) = handle
         .add_tool(FileWriteTool {
             context: context.clone(),
         })
-        .await?;
-    handle
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileWriteTool::NAME);
+
+    if let Err(error) = handle
         .add_tool(FileEditTool {
             context: context.clone(),
         })
-        .await?;
-    handle.add_tool(FileListTool { context }).await?;
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileEditTool::NAME);
+
+    if let Err(error) = handle.add_tool(FileListTool { context }).await {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
     Ok(())
 }
 

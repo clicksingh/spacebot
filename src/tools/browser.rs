@@ -2231,19 +2231,22 @@ pub async fn add_browser_tools_to_handle(
 }
 
 /// Remove all browser tools from an existing running tool server handle.
-pub async fn remove_browser_tools_from_handle(handle: &rig::tool::server::ToolServerHandle) {
-    let _ = handle.remove_tool(BrowserLaunchTool::NAME).await;
-    let _ = handle.remove_tool(BrowserNavigateTool::NAME).await;
-    let _ = handle.remove_tool(BrowserSnapshotTool::NAME).await;
-    let _ = handle.remove_tool(BrowserClickTool::NAME).await;
-    let _ = handle.remove_tool(BrowserTypeTool::NAME).await;
-    let _ = handle.remove_tool(BrowserPressKeyTool::NAME).await;
-    let _ = handle.remove_tool(BrowserScreenshotTool::NAME).await;
-    let _ = handle.remove_tool(BrowserEvaluateTool::NAME).await;
-    let _ = handle.remove_tool(BrowserTabOpenTool::NAME).await;
-    let _ = handle.remove_tool(BrowserTabListTool::NAME).await;
-    let _ = handle.remove_tool(BrowserTabCloseTool::NAME).await;
-    let _ = handle.remove_tool(BrowserCloseTool::NAME).await;
+pub async fn remove_browser_tools_from_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    handle.remove_tool(BrowserLaunchTool::NAME).await?;
+    handle.remove_tool(BrowserNavigateTool::NAME).await?;
+    handle.remove_tool(BrowserSnapshotTool::NAME).await?;
+    handle.remove_tool(BrowserClickTool::NAME).await?;
+    handle.remove_tool(BrowserTypeTool::NAME).await?;
+    handle.remove_tool(BrowserPressKeyTool::NAME).await?;
+    handle.remove_tool(BrowserScreenshotTool::NAME).await?;
+    handle.remove_tool(BrowserEvaluateTool::NAME).await?;
+    handle.remove_tool(BrowserTabOpenTool::NAME).await?;
+    handle.remove_tool(BrowserTabListTool::NAME).await?;
+    handle.remove_tool(BrowserTabCloseTool::NAME).await?;
+    handle.remove_tool(BrowserCloseTool::NAME).await?;
+    Ok(())
 }
 
 // Shared helpers

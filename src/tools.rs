@@ -629,11 +629,19 @@ async fn remove_emergency_channel_tools(handle: &ToolServerHandle, state: &Chann
     let _ = handle.remove_tool(FileListTool::NAME).await;
     let _ = handle.remove_tool(SecretSetTool::NAME).await;
     let _ = handle.remove_tool(WebSearchTool::NAME).await;
-    remove_browser_tools_from_handle(handle).await;
+    if let Err(error) = remove_browser_tools_from_handle(handle).await {
+        tracing::warn!(%error, "failed to remove one or more browser emergency tools");
+    }
 
     // MCP tool names are dynamic; remove current connected set best-effort.
     for mcp_tool in state.deps.mcp_manager.get_tools().await {
-        let _ = handle.remove_tool(&mcp_tool.name()).await;
+        if let Err(error) = handle.remove_tool(&mcp_tool.name()).await {
+            tracing::warn!(
+                %error,
+                tool_name = %mcp_tool.name(),
+                "failed to remove emergency MCP tool"
+            );
+        }
     }
 }
 
