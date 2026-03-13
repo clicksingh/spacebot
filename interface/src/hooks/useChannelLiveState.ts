@@ -47,11 +47,26 @@ export interface ActiveBranch {
 	toolCalls: number;
 }
 
+export interface ChannelToolActivity {
+	id: string;
+	name: string;
+	args: string;
+	result: string | null;
+	status: "running" | "completed";
+}
+
+export interface ActiveChannelExecution {
+	startedAt: number;
+	currentTool: string | null;
+	toolCalls: number;
+	calls: ChannelToolActivity[];
+}
 export interface ChannelLiveState {
 	isTyping: boolean;
 	timeline: TimelineItem[];
 	workers: Record<string, ActiveWorker>;
 	branches: Record<string, ActiveBranch>;
+	channelExecution: ActiveChannelExecution | null;
 	streamingMessageId: string | null;
 	historyLoaded: boolean;
 	hasMore: boolean;
@@ -66,6 +81,7 @@ function emptyLiveState(): ChannelLiveState {
 		timeline: [],
 		workers: {},
 		branches: {},
+		channelExecution: null,
 		streamingMessageId: null,
 		historyLoaded: false,
 		hasMore: true,
@@ -630,6 +646,32 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 						},
 					};
 				}
+				if (event.process_type === "channel") {
+					const execution = state.channelExecution ?? {
+						startedAt: Date.now(),
+						currentTool: null,
+						toolCalls: 0,
+						calls: [],
+					};
+					const nextCall: ChannelToolActivity = {
+						id: "ch-" + generateId(),
+						name: event.tool_name,
+						args: event.args,
+						result: null,
+						status: "running",
+					};
+					return {
+						...prev,
+						[channelId]: {
+							...state,
+							channelExecution: {
+								...execution,
+								currentTool: event.tool_name,
+								calls: [...execution.calls, nextCall].slice(-20),
+							},
+						},
+					};
+				}
 				return prev;
 			});
 		} else {
@@ -658,6 +700,32 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 								branches: {
 									...state.branches,
 									[event.process_id]: { ...branch, currentTool: event.tool_name },
+								},
+							},
+						};
+					}
+					if (event.process_type === "channel" && chId === event.process_id) {
+						const execution = state.channelExecution ?? {
+							startedAt: Date.now(),
+							currentTool: null,
+							toolCalls: 0,
+							calls: [],
+						};
+						const nextCall: ChannelToolActivity = {
+							id: "ch-" + generateId(),
+							name: event.tool_name,
+							args: event.args,
+							result: null,
+							status: "running",
+						};
+						return {
+							...prev,
+							[chId]: {
+								...state,
+								channelExecution: {
+									...execution,
+									currentTool: event.tool_name,
+									calls: [...execution.calls, nextCall].slice(-20),
 								},
 							},
 						};
@@ -714,6 +782,44 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 						},
 					};
 				}
+				if (event.process_type === "channel") {
+					const execution = state.channelExecution ?? {
+						startedAt: Date.now(),
+						currentTool: null,
+						toolCalls: 0,
+						calls: [],
+					};
+					const calls = [...execution.calls];
+					let matched = false;
+					for (let i = calls.length - 1; i >= 0; i -= 1) {
+						if (calls[i].status === "running" && calls[i].name === event.tool_name) {
+							calls[i] = { ...calls[i], status: "completed", result: event.result };
+							matched = true;
+							break;
+						}
+					}
+					if (!matched) {
+						calls.push({
+							id: "ch-" + generateId(),
+							name: event.tool_name,
+							args: "",
+							result: event.result,
+							status: "completed",
+						});
+					}
+					return {
+						...prev,
+						[channelId]: {
+							...state,
+							channelExecution: {
+								...execution,
+								currentTool: null,
+								toolCalls: execution.toolCalls + 1,
+								calls: calls.slice(-20),
+							},
+						},
+					};
+				}
 				return prev;
 			});
 		} else {
@@ -750,6 +856,44 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 										lastTool: event.tool_name,
 										toolCalls: branch.toolCalls + 1,
 									},
+								},
+							},
+						};
+					}
+					if (event.process_type === "channel" && chId === event.process_id) {
+						const execution = state.channelExecution ?? {
+							startedAt: Date.now(),
+							currentTool: null,
+							toolCalls: 0,
+							calls: [],
+						};
+						const calls = [...execution.calls];
+						let matched = false;
+						for (let i = calls.length - 1; i >= 0; i -= 1) {
+							if (calls[i].status === "running" && calls[i].name === event.tool_name) {
+								calls[i] = { ...calls[i], status: "completed", result: event.result };
+								matched = true;
+								break;
+							}
+						}
+						if (!matched) {
+							calls.push({
+								id: "ch-" + generateId(),
+								name: event.tool_name,
+								args: "",
+								result: event.result,
+								status: "completed",
+							});
+						}
+						return {
+							...prev,
+							[chId]: {
+								...state,
+								channelExecution: {
+									...execution,
+									currentTool: null,
+									toolCalls: execution.toolCalls + 1,
+									calls: calls.slice(-20),
 								},
 							},
 						};

@@ -1041,6 +1041,15 @@ impl Channel {
                     persisted,
                     "override mode enabled"
                 );
+                self.state.conversation_logger.log_system_message(
+                    self.id.as_ref(),
+                    &format!(
+                        "override mode enabled by {}:{} (adapter={})",
+                        message.source,
+                        message.sender_id,
+                        message.adapter_key()
+                    ),
+                );
                 self.send_builtin_text(body, "override-on").await;
                 return Ok(true);
             }
@@ -1077,6 +1086,15 @@ impl Channel {
                     source = %message.source,
                     persisted,
                     "override mode disabled"
+                );
+                self.state.conversation_logger.log_system_message(
+                    self.id.as_ref(),
+                    &format!(
+                        "override mode disabled by {}:{} (adapter={})",
+                        message.source,
+                        message.sender_id,
+                        message.adapter_key()
+                    ),
                 );
                 self.send_builtin_text(body, "override-off").await;
                 return Ok(true);
@@ -1728,7 +1746,7 @@ impl Channel {
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
-            self.conversation_context.clone(),
+            self.prompt_conversation_context(),
             empty_to_none(status_text),
             coalesce_hint,
             available_channels,
@@ -2314,6 +2332,23 @@ impl Channel {
         }
     }
 
+    fn override_prompt_context(&self) -> String {
+        if self.emergency_override_mode {
+            "EMERGENCY OVERRIDE MODE: ON\n\nExecution posture:\n- You are in hybrid override mode. You may execute directly with channel tools for speed/reliability, and you may still delegate to branch/worker when the user asks or delegation is clearly better.\n- If the user explicitly asks to use a worker/branch, comply unless tooling is unavailable.\n- If delegation fails, fall back to direct channel execution and continue.\n\nTooling and safety:\n- Elevated channel tools may be mounted (memory/task/docs/shell/file plus optional browser/web/mcp/secrets when configured). Confirm tool availability from the active tool list before planning.\n- Override is not a sandbox/permission bypass. Follow normal safety and redaction rules.\n- Use /override status for mode check and /override off to return to baseline behavior.".to_string()
+        } else {
+            "EMERGENCY OVERRIDE MODE: OFF\n- Use normal channel routing and delegation behavior.".to_string()
+        }
+    }
+
+    fn prompt_conversation_context(&self) -> Option<String> {
+        let override_context = self.override_prompt_context();
+        match self.conversation_context.as_ref() {
+            Some(existing) if !existing.trim().is_empty() => {
+                Some(format!("{}\n\n{}", existing.trim(), override_context))
+            }
+            _ => Some(override_context),
+        }
+    }
     /// Build a snapshot of the system configuration for status block injection.
     async fn build_system_info(&self) -> SystemInfo {
         let runtime_config = &self.deps.runtime_config;
@@ -2379,7 +2414,7 @@ impl Channel {
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
-            self.conversation_context.clone(),
+            self.prompt_conversation_context(),
             empty_to_none(status_text),
             None, // coalesce_hint - only set for batched messages
             available_channels,
