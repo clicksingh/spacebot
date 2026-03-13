@@ -774,8 +774,19 @@ async fn remove_emergency_channel_tools(
     remove_best_effort(handle, FileWriteTool::NAME, &mut first_error).await;
     remove_best_effort(handle, FileEditTool::NAME, &mut first_error).await;
     remove_best_effort(handle, FileListTool::NAME, &mut first_error).await;
-    remove_best_effort(handle, SecretSetTool::NAME, &mut first_error).await;
-    remove_best_effort(handle, WebSearchTool::NAME, &mut first_error).await;
+    if state.deps.runtime_config.secrets.load().as_ref().is_some() {
+        remove_best_effort(handle, SecretSetTool::NAME, &mut first_error).await;
+    }
+    if state
+        .deps
+        .runtime_config
+        .brave_search_key
+        .load()
+        .as_ref()
+        .is_some()
+    {
+        remove_best_effort(handle, WebSearchTool::NAME, &mut first_error).await;
+    }
 
     // Match add-path gating: only attempt browser teardown when enabled.
     if state.deps.runtime_config.browser_config.load().enabled
@@ -788,12 +799,24 @@ async fn remove_emergency_channel_tools(
     }
 
     // Remove from the snapshot captured when emergency tools were mounted.
-    let mcp_tool_names = {
-        let mut snapshot = state.emergency_mcp_tool_names.write().await;
-        std::mem::take(&mut *snapshot)
+    // Keep entries for failed removals so teardown can retry them later.
+    let mcp_tool_names: Vec<String> = {
+        let snapshot = state.emergency_mcp_tool_names.read().await;
+        snapshot.iter().cloned().collect()
     };
     for tool_name in mcp_tool_names {
-        remove_best_effort(handle, &tool_name, &mut first_error).await;
+        match handle.remove_tool(&tool_name).await {
+            Ok(()) => {
+                let mut snapshot = state.emergency_mcp_tool_names.write().await;
+                snapshot.remove(&tool_name);
+            }
+            Err(error) => {
+                tracing::warn!(%error, tool_name = %tool_name, "failed to remove emergency tool");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
     }
 
     if let Some(error) = first_error {
