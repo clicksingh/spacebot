@@ -976,6 +976,16 @@ impl Channel {
         }
     }
 
+    fn has_active_channel_run(&self) -> bool {
+        match self.active_channel_run_id.lock() {
+            Ok(guard) => guard.is_some(),
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned during read; recovering");
+                error.into_inner().is_some()
+            }
+        }
+    }
+
     async fn try_handle_builtin_ops_commands(
         &mut self,
         raw_text: &str,
@@ -2889,6 +2899,18 @@ impl Channel {
                             );
                             self.send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
+                        } else if self.has_active_channel_run() {
+                            let fallback = "I completed tool execution but no final summary was generated. Say \"summarize last run\" and I will compile the results from the direct execution card.".to_string();
+                            self.state.conversation_logger.log_bot_message_with_name(
+                                &self.state.channel_id,
+                                &fallback,
+                                Some(self.agent_display_name()),
+                            );
+                            self.send_outbound_text(
+                                fallback,
+                                "failed to send silent-direct-run fallback",
+                            )
+                            .await;
                         }
                     }
 
