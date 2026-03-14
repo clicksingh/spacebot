@@ -552,7 +552,7 @@ impl ProcessRunLogger {
             if let Err(error) = sqlx::query(
                 "INSERT INTO channel_runs (id, channel_id, tool_calls_json, tool_calls_count, status) \
                  VALUES (?, ?, '[]', 0, 'running') \
-                 ON CONFLICT(id) DO UPDATE SET status = 'running'",
+                 ON CONFLICT(id) DO NOTHING",
             )
             .bind(&run_id)
             .bind(&channel_id)
@@ -578,11 +578,14 @@ impl ProcessRunLogger {
                 return;
             }
 
-            if let Err(error) =
-                sqlx::query("UPDATE channel_runs SET status = 'running' WHERE id = ?")
-                    .bind(&run_id)
-                    .execute(&pool)
-                    .await
+            if let Err(error) = sqlx::query(
+                "UPDATE channel_runs \
+                 SET status = CASE WHEN completed_at IS NULL THEN 'running' ELSE status END \
+                 WHERE id = ?",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
             {
                 tracing::warn!(%error, run_id = %run_id, "failed to mark channel run as running");
             }
@@ -661,7 +664,8 @@ impl ProcessRunLogger {
 
             if let Err(error) = sqlx::query(
                 "UPDATE channel_runs \
-                 SET tool_calls_count = tool_calls_count + 1, status = 'running' \
+                 SET tool_calls_count = tool_calls_count + 1, \
+                     status = CASE WHEN completed_at IS NULL THEN 'running' ELSE status END \
                  WHERE id = ?",
             )
             .bind(&run_id)

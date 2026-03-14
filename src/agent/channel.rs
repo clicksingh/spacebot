@@ -31,6 +31,7 @@ use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
@@ -462,6 +463,8 @@ pub struct Channel {
     emergency_override_session_override: Option<bool>,
     /// Active persisted direct channel run ID (if a direct tool execution is in progress).
     active_channel_run_id: Mutex<Option<String>>,
+    /// Set when a turn completion requested run finalization before a run ID was observed.
+    pending_channel_run_completion: AtomicBool,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
 }
@@ -604,6 +607,7 @@ impl Channel {
             emergency_override_mode: resolved_emergency_override_mode,
             emergency_override_session_override: None,
             active_channel_run_id: Mutex::new(None),
+            pending_channel_run_completion: AtomicBool::new(false),
             control_handle,
         };
 
@@ -948,13 +952,22 @@ impl Channel {
             }
         };
 
-        if let Some(existing) = guard.as_ref() {
-            return existing.clone();
+        let run_id = if let Some(existing) = guard.as_ref() {
+            existing.clone()
+        } else {
+            let run_id = format!("ch-run-{}", uuid::Uuid::new_v4());
+            run_logger.log_channel_run_started(&self.id, &run_id);
+            *guard = Some(run_id.clone());
+            run_id
+        };
+
+        if self
+            .pending_channel_run_completion
+            .swap(false, Ordering::Relaxed)
+        {
+            run_logger.log_channel_run_completed(&self.id, &run_id);
         }
 
-        let run_id = format!("ch-run-{}", uuid::Uuid::new_v4());
-        run_logger.log_channel_run_started(&self.id, &run_id);
-        *guard = Some(run_id.clone());
         run_id
     }
 
@@ -971,10 +984,11 @@ impl Channel {
             self.state
                 .process_run_logger
                 .log_channel_run_completed(&self.id, &run_id);
+            self.pending_channel_run_completion
+                .store(false, Ordering::Relaxed);
         } else {
-            self.state
-                .process_run_logger
-                .log_latest_channel_run_completed(&self.id);
+            self.pending_channel_run_completion
+                .store(true, Ordering::Relaxed);
         }
     }
 
