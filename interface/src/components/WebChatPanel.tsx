@@ -423,6 +423,12 @@ function detectOverrideModeFromTimeline(timeline: TimelineItem[]): OverrideMode 
 	return "unknown";
 }
 
+function timelineItemTimestampMs(item: TimelineItem): number {
+	const iso = item.type === "message" ? item.created_at : item.started_at;
+	const parsed = Date.parse(iso);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
 	const {liveStates} = useLiveContext();
@@ -439,6 +445,19 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const executionHistory = liveState?.channelExecutionHistory ?? [];
 	const hasActiveWorkers = activeWorkers.length > 0;
 	const inferredOverrideMode = useMemo(() => detectOverrideModeFromTimeline(timeline), [timeline]);
+	const mergedItems = useMemo(() => {
+		const timelineEntries = timeline.map((item) => ({
+			kind: "timeline" as const,
+			at: timelineItemTimestampMs(item),
+			item,
+		}));
+		const executionEntries = executionHistory.map((run) => ({
+			kind: "execution_history" as const,
+			at: run.completedAt ?? run.startedAt,
+			run,
+		}));
+		return [...timelineEntries, ...executionEntries].sort((a, b) => a.at - b.at);
+	}, [timeline, executionHistory]);
 
 	useEffect(() => {
 		if (inferredOverrideMode !== "unknown") {
@@ -448,7 +467,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
-	}, [timeline.length, isTyping, activeWorkers.length, execution?.calls.length, execution?.currentTool]);
+	}, [timeline.length, executionHistory.length, isTyping, activeWorkers.length, execution?.calls.length, execution?.currentTool]);
 
 	const handleSubmit = () => {
 		const trimmed = input.trim();
@@ -492,13 +511,24 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 						{hasActiveWorkers && <ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />}
 					</div>
 
-					{timeline.length === 0 && !isTyping && (
+					{mergedItems.length === 0 && !isTyping && (
 						<div className="flex flex-col items-center justify-center py-24">
 							<p className="text-sm text-ink-faint">Start a conversation with {agentId}</p>
 						</div>
 					)}
 
-					{timeline.map((item) => {
+					{mergedItems.map((entry) => {
+						if (entry.kind === "execution_history") {
+							return (
+								<ChannelExecutionPanel
+									key={`execution-${entry.run.id}`}
+									execution={entry.run}
+									isTyping={false}
+									channelId={sessionId}
+								/>
+							);
+						}
+						const item = entry.item;
 						if (item.type === "branch_run") {
 							return <BranchTimelineItem key={`branch-${item.id}`} item={item} />;
 						}
@@ -524,10 +554,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 							</div>
 						);
 					})}
-
-					{executionHistory.map((run) => (
-						<ChannelExecutionPanel key={run.id} execution={run} isTyping={false} channelId={sessionId} />
-					))}
 
 					{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
 						<ChannelExecutionPanel execution={execution} isTyping={isTyping} channelId={sessionId} />
