@@ -94,7 +94,7 @@ function ChannelExecutionPanel({
 	}));
 
 	const showLive = isTyping || execution.currentTool !== null;
-	const running = execution.currentTool !== null || execution.calls.some((call) => call.status === "running");
+	const running = isTyping || execution.currentTool !== null || execution.calls.some((call) => call.status === "running");
 
 	return (
 		<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
