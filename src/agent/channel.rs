@@ -15,6 +15,7 @@ use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
+use crate::config::ChannelAdminIdentity;
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
@@ -30,7 +31,8 @@ use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 
@@ -124,6 +126,10 @@ pub struct ChannelState {
     /// `ToolStarted`/`ToolCompleted` events as they flow through the system.
     /// Defaults to a standalone empty map when the API layer is not active.
     pub live_worker_transcripts: LiveWorkerTranscripts,
+    /// Snapshot of emergency-mode MCP tool names mounted during the last turn.
+    /// Used for deterministic teardown even if MCP connectivity changes before
+    /// removal runs.
+    pub emergency_mcp_tool_names: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ChannelState {
@@ -451,6 +457,14 @@ pub struct Channel {
     listen_only_mode: bool,
     /// Session-scoped override used when persistence is unavailable/failed.
     listen_only_session_override: Option<bool>,
+    /// Channel-local emergency override mode toggle.
+    emergency_override_mode: bool,
+    /// Session-scoped override used when persistence is unavailable/failed.
+    emergency_override_session_override: Option<bool>,
+    /// Active persisted direct channel run ID (if a direct tool execution is in progress).
+    active_channel_run_id: Mutex<Option<String>>,
+    /// Set when a turn completion requested run finalization before a run ID was observed.
+    pending_channel_run_completion: AtomicBool,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
 }
@@ -532,6 +546,7 @@ impl Channel {
             prompt_snapshot_store,
             live_worker_transcripts: live_worker_transcripts
                 .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
+            emergency_mcp_tool_names: Arc::new(RwLock::new(HashSet::new())),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -557,6 +572,7 @@ impl Channel {
 
         let self_tx = message_tx.clone();
         let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
+        let resolved_emergency_override_mode = false;
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -588,6 +604,10 @@ impl Channel {
             backfill_transcript: None,
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
+            emergency_override_mode: resolved_emergency_override_mode,
+            emergency_override_session_override: None,
+            active_channel_run_id: Mutex::new(None),
+            pending_channel_run_completion: AtomicBool::new(false),
             control_handle,
         };
 
@@ -692,6 +712,89 @@ impl Channel {
         self.listen_only_mode = enabled;
         self.listen_only_session_override = if persisted { None } else { Some(enabled) };
         persisted
+    }
+
+    fn sync_emergency_override_mode_from_runtime(&mut self) {
+        if let Some(override_mode) = self.emergency_override_session_override {
+            self.emergency_override_mode = override_mode;
+            return;
+        }
+        let runtime_default = false;
+        let settings_store = self
+            .deps
+            .runtime_config
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .cloned();
+        self.emergency_override_mode = if let Some(settings_store) = settings_store {
+            match settings_store.channel_emergency_override_mode_for(self.id.as_ref()) {
+                Ok(Some(enabled)) => enabled,
+                Ok(None) => runtime_default,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        "failed to sync channel-scoped emergency_override_mode setting"
+                    );
+                    runtime_default
+                }
+            }
+        } else {
+            runtime_default
+        };
+    }
+
+    fn set_emergency_override_mode(&mut self, enabled: bool) -> bool {
+        let mut persisted = false;
+        let settings_store = self
+            .deps
+            .runtime_config
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .cloned();
+        if let Some(settings_store) = settings_store {
+            match settings_store.set_channel_emergency_override_mode_for(self.id.as_ref(), enabled)
+            {
+                Ok(()) => persisted = true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        emergency_override_mode = enabled,
+                        "failed to persist emergency_override_mode setting"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                channel_id = %self.id,
+                emergency_override_mode = enabled,
+                "settings store unavailable; emergency_override_mode is session-scoped"
+            );
+        }
+
+        self.emergency_override_mode = enabled;
+        self.emergency_override_session_override = if persisted { None } else { Some(enabled) };
+        persisted
+    }
+
+    fn is_admin_identity_authorized(&self, message: &InboundMessage) -> bool {
+        let channel_config = self.deps.runtime_config.channel_config.load();
+        admin_identity_matches_message(&channel_config.admin_identities, message)
+    }
+
+    fn has_admin_identities_configured(&self) -> bool {
+        !self
+            .deps
+            .runtime_config
+            .channel_config
+            .load()
+            .admin_identities
+            .is_empty()
     }
 
     fn persist_inbound_user_message(
@@ -811,6 +914,7 @@ impl Channel {
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
         match self.send_routed(OutboundResponse::Text(text.clone())).await {
             Ok(()) => {
+                self.complete_active_channel_run_if_any();
                 #[cfg(feature = "metrics")]
                 {
                     let channel_type = self.current_adapter().unwrap_or("unknown");
@@ -839,6 +943,65 @@ impl Channel {
         }
     }
 
+    fn ensure_active_channel_run_id(&self, run_logger: &ProcessRunLogger) -> String {
+        let mut guard = match self.active_channel_run_id.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned; recovering");
+                error.into_inner()
+            }
+        };
+
+        let run_id = if let Some(existing) = guard.as_ref() {
+            existing.clone()
+        } else {
+            let run_id = format!("ch-run-{}", uuid::Uuid::new_v4());
+            run_logger.log_channel_run_started(&self.id, &run_id);
+            *guard = Some(run_id.clone());
+            run_id
+        };
+
+        if self
+            .pending_channel_run_completion
+            .swap(false, Ordering::Relaxed)
+        {
+            run_logger.log_channel_run_completed(&self.id, &run_id);
+        }
+
+        run_id
+    }
+
+    fn complete_active_channel_run_if_any(&self) {
+        let run_id = match self.active_channel_run_id.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned during completion; recovering");
+                error.into_inner().take()
+            }
+        };
+
+        if let Some(run_id) = run_id {
+            self.state
+                .process_run_logger
+                .log_channel_run_completed(&self.id, &run_id);
+            self.pending_channel_run_completion
+                .store(false, Ordering::Relaxed);
+        } else {
+            self.pending_channel_run_completion
+                .store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn has_active_channel_run(&self) -> bool {
+        match self.active_channel_run_id.lock() {
+            Ok(guard) => guard.is_some(),
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned during read; recovering");
+                error.into_inner().is_some()
+            }
+        }
+    }
+
     async fn try_handle_builtin_ops_commands(
         &mut self,
         raw_text: &str,
@@ -849,7 +1012,7 @@ impl Channel {
         }
         let supported_source = matches!(
             message.source.as_str(),
-            "telegram" | "discord" | "slack" | "twitch" | "signal"
+            "telegram" | "discord" | "slack" | "twitch" | "signal" | "webchat"
         );
         if !supported_source {
             return Ok(false);
@@ -873,6 +1036,11 @@ impl Channel {
                 } else {
                     "active"
                 };
+                let emergency_override = if self.emergency_override_mode {
+                    "on"
+                } else {
+                    "off"
+                };
                 let adapter = self.current_adapter().unwrap_or("unknown");
                 let body = format!(
                     "status\n\
@@ -880,6 +1048,7 @@ impl Channel {
                      - channel: {}\n\
                      - adapter: {}\n\
                      - mode: {} (quiet => only command/@mention/reply-to-bot)\n\
+                     - emergency_override: {}\n\
                      - channel model: {}\n\
                      - branch model: {}\n\
                      - time: {}",
@@ -887,11 +1056,114 @@ impl Channel {
                     self.id,
                     adapter,
                     mode,
+                    emergency_override,
                     channel_model,
                     branch_model,
                     now_line
                 );
                 self.send_builtin_text(body, "status").await;
+                return Ok(true);
+            }
+            "/override status" => {
+                let mode = if self.emergency_override_mode {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.send_builtin_text(format!("override mode: {mode}"), "override-status")
+                    .await;
+                return Ok(true);
+            }
+            "/override on" => {
+                if !self.has_admin_identities_configured() {
+                    self.send_builtin_text(
+                        "override unavailable: no admin identities configured.".to_string(),
+                        "override-on",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                if !self.is_admin_identity_authorized(message) {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        source = %message.source,
+                        "unauthorized override on attempt"
+                    );
+                    self.send_builtin_text(
+                        "override denied: admin identity required.".to_string(),
+                        "override-on",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                let persisted = self.set_emergency_override_mode(true);
+                let body = if persisted {
+                    "override mode enabled.".to_string()
+                } else {
+                    "override mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                tracing::info!(
+                    channel_id = %self.id,
+                    source = %message.source,
+                    persisted,
+                    "override mode enabled"
+                );
+                self.state.conversation_logger.log_system_message(
+                    self.id.as_ref(),
+                    &format!(
+                        "override mode enabled by {}:{} (adapter={})",
+                        message.source,
+                        message.sender_id,
+                        message.adapter_key()
+                    ),
+                );
+                self.send_builtin_text(body, "override-on").await;
+                return Ok(true);
+            }
+            "/override off" => {
+                if !self.has_admin_identities_configured() {
+                    self.send_builtin_text(
+                        "override unavailable: no admin identities configured.".to_string(),
+                        "override-off",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                if !self.is_admin_identity_authorized(message) {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        source = %message.source,
+                        "unauthorized override off attempt"
+                    );
+                    self.send_builtin_text(
+                        "override denied: admin identity required.".to_string(),
+                        "override-off",
+                    )
+                    .await;
+                    return Ok(true);
+                }
+                let persisted = self.set_emergency_override_mode(false);
+                let body = if persisted {
+                    "override mode disabled.".to_string()
+                } else {
+                    "override mode disabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                tracing::info!(
+                    channel_id = %self.id,
+                    source = %message.source,
+                    persisted,
+                    "override mode disabled"
+                );
+                self.state.conversation_logger.log_system_message(
+                    self.id.as_ref(),
+                    &format!(
+                        "override mode disabled by {}:{} (adapter={})",
+                        message.source,
+                        message.sender_id,
+                        message.adapter_key()
+                    ),
+                );
+                self.send_builtin_text(body, "override-off").await;
                 return Ok(true);
             }
             "/quiet" => {
@@ -924,6 +1196,7 @@ impl Channel {
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /quiet: listen-only mode".to_string(),
                     "- /active: normal reply mode".to_string(),
+                    "- /override status|on|off: emergency override mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
                 let body = lines.join("\n");
@@ -1168,6 +1441,7 @@ impl Channel {
     async fn handle_message_batch(&mut self, messages: Vec<InboundMessage>) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
         self.sync_listen_only_mode_from_runtime();
+        self.sync_emergency_override_mode_from_runtime();
 
         let message_count = messages.len();
         let batch_start_timestamp = messages
@@ -1334,7 +1608,7 @@ impl Channel {
                     &self.state.channel_id,
                     sender_name,
                     &message.sender_id,
-                    &raw_text,
+                    &redact_override_command(&raw_text),
                     &metadata,
                 );
                 self.state
@@ -1539,7 +1813,7 @@ impl Channel {
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
-            self.conversation_context.clone(),
+            self.prompt_conversation_context(),
             empty_to_none(status_text),
             coalesce_hint,
             available_channels,
@@ -1560,6 +1834,7 @@ impl Channel {
     async fn handle_message(&mut self, message: InboundMessage) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
         self.sync_listen_only_mode_from_runtime();
+        self.sync_emergency_override_mode_from_runtime();
 
         // Track the inbound message that triggered this turn so outbound
         // responses carry the correct routing metadata (e.g. Slack thread_ts).
@@ -1647,7 +1922,8 @@ impl Channel {
             .as_ref()
             .map(|data| data.iter().map(|(meta, _)| meta.clone()).collect());
 
-        self.persist_inbound_user_message(&message, &raw_text, saved_metas.as_deref());
+        let redacted_raw_text = redact_override_command(&raw_text);
+        self.persist_inbound_user_message(&message, &redacted_raw_text, saved_metas.as_deref());
 
         // Deterministic built-in command: bypass model output drift for agent identity checks.
         if message.source != "system" && raw_text.trim() == "/agent-id" {
@@ -2123,6 +2399,24 @@ impl Channel {
         }
     }
 
+    fn override_prompt_context(&self) -> String {
+        if self.emergency_override_mode {
+            "EMERGENCY OVERRIDE MODE: ON\n\nExecution posture:\n- You are in hybrid override mode. You may execute directly with channel tools for speed/reliability, and you may still delegate to branch/worker when the user asks or delegation is clearly better.\n- If the user explicitly asks to use a worker/branch, comply unless tooling is unavailable.\n- If delegation fails, fall back to direct channel execution and continue.\n\nTooling and safety:\n- Elevated channel tools may be mounted (memory/task/docs/shell/file plus optional browser/web/mcp/secrets when configured). Confirm tool availability from the active tool list before planning.\n- Override is not a sandbox/permission bypass. Follow normal safety and redaction rules.\n- Use /override status for mode check and /override off to return to baseline behavior.".to_string()
+        } else {
+            "EMERGENCY OVERRIDE MODE: OFF\n- Use normal channel routing and delegation behavior."
+                .to_string()
+        }
+    }
+
+    fn prompt_conversation_context(&self) -> Option<String> {
+        let override_context = self.override_prompt_context();
+        match self.conversation_context.as_ref() {
+            Some(existing) if !existing.trim().is_empty() => {
+                Some(format!("{}\n\n{}", existing.trim(), override_context))
+            }
+            _ => Some(override_context),
+        }
+    }
     /// Build a snapshot of the system configuration for status block injection.
     async fn build_system_info(&self) -> SystemInfo {
         let runtime_config = &self.deps.runtime_config;
@@ -2188,7 +2482,7 @@ impl Channel {
             empty_to_none(memory_bulletin.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
-            self.conversation_context.clone(),
+            self.prompt_conversation_context(),
             empty_to_none(status_text),
             None, // coalesce_hint - only set for batched messages
             available_channels,
@@ -2256,6 +2550,7 @@ impl Channel {
             allow_direct_reply,
             adapter.map(|s| s.to_string()),
             slack_thread_ts.as_deref(),
+            self.emergency_override_mode,
         )
         .await
         {
@@ -2263,120 +2558,134 @@ impl Channel {
             return Err(AgentError::Other(error.into()).into());
         }
 
-        let rc = &self.deps.runtime_config;
-        let routing = rc.routing.load();
-        let max_turns = if is_retrigger {
-            RETRIGGER_MAX_TURNS
-        } else {
-            **rc.max_turns.load()
-        };
-        let model_name = routing.resolve(ProcessType::Channel, None);
-        let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
-            .with_context(&*self.deps.agent_id, "channel")
-            .with_routing((**routing).clone());
+        let turn_result: Result<(
+            std::result::Result<String, rig::completion::PromptError>,
+            bool,
+        )> = async {
+            let rc = &self.deps.runtime_config;
+            let routing = rc.routing.load();
+            let max_turns = if is_retrigger {
+                RETRIGGER_MAX_TURNS
+            } else {
+                **rc.max_turns.load()
+            };
+            let model_name = routing.resolve(ProcessType::Channel, None);
+            let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
+                .with_context(&*self.deps.agent_id, "channel")
+                .with_routing((**routing).clone());
 
-        let agent = AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .default_max_turns(max_turns)
-            .tool_server_handle(self.tool_server.clone())
-            .build();
+            let agent = AgentBuilder::new(model)
+                .preamble(system_prompt)
+                .default_max_turns(max_turns)
+                .tool_server_handle(self.tool_server.clone())
+                .build();
 
-        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
-            .await
-            .ok();
+            self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+                .await
+                .ok();
 
-        // Inject attachments as a user message before the text prompt
-        if !attachment_content.is_empty() {
-            let mut history = self.state.history.write().await;
-            let content = OneOrMany::many(attachment_content).unwrap_or_else(|_| {
-                OneOrMany::one(UserContent::text("[attachment processing failed]"))
-            });
-            history.push(rig::message::Message::User { content });
-            drop(history);
-        }
-
-        // For retrigger turns, inject a synthetic assistant acknowledgment so the
-        // LLM sees proper user/assistant role alternation. Without this, the API
-        // receives back-to-back user messages (the original user prompt preserved
-        // from the prior turn + the retrigger system message), which causes some
-        // models to return empty responses or get confused about whose turn it is.
-        if is_retrigger {
-            let mut history = self.state.history.write().await;
-            // Only inject if the last message is a user message (avoid double-stacking
-            // if history already ends with an assistant message).
-            let needs_bridge = history
-                .last()
-                .is_some_and(|m| matches!(m, rig::message::Message::User { .. }));
-            if needs_bridge {
-                history.push(rig::message::Message::Assistant {
-                    id: None,
-                    content: OneOrMany::one(rig::message::AssistantContent::text(
-                        "[acknowledged — working on it in background]",
-                    )),
+            // Inject attachments as a user message before the text prompt
+            if !attachment_content.is_empty() {
+                let mut history = self.state.history.write().await;
+                let content = OneOrMany::many(attachment_content).unwrap_or_else(|_| {
+                    OneOrMany::one(UserContent::text("[attachment processing failed]"))
                 });
-            }
-            drop(history);
-        }
-
-        // Clone history out so the write lock is released before the agentic loop.
-        // The branch tool needs a read lock on history to clone it for the branch,
-        // and holding a write lock across the entire agentic loop would deadlock.
-        let mut history = {
-            let guard = self.state.history.read().await;
-            guard.clone()
-        };
-        let history_len_before = history.len();
-
-        // ── Prompt snapshot capture (fire-and-forget) ──
-        self.maybe_capture_snapshot(system_prompt, user_text, &history);
-
-        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
-
-        // If the LLM responded with text that looks like tool call syntax, it failed
-        // to use the tool calling API. Inject a correction and retry a couple
-        // times so the model can recover by calling `reply` or `skip`.
-        const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
-        let mut recovery_attempts = 0;
-        while let Ok(ref response) = result {
-            if !crate::tools::should_block_user_visible_text(response)
-                || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
-            {
-                break;
+                history.push(rig::message::Message::User { content });
+                drop(history);
             }
 
-            recovery_attempts += 1;
-            tracing::warn!(
-                channel_id = %self.id,
-                attempt = recovery_attempts,
-                "LLM emitted blocked structured output, retrying with correction"
-            );
+            // For retrigger turns, inject a synthetic assistant acknowledgment so the
+            // LLM sees proper user/assistant role alternation. Without this, the API
+            // receives back-to-back user messages (the original user prompt preserved
+            // from the prior turn + the retrigger system message), which causes some
+            // models to return empty responses or get confused about whose turn it is.
+            if is_retrigger {
+                let mut history = self.state.history.write().await;
+                // Only inject if the last message is a user message (avoid double-stacking
+                // if history already ends with an assistant message).
+                let needs_bridge = history
+                    .last()
+                    .is_some_and(|m| matches!(m, rig::message::Message::User { .. }));
+                if needs_bridge {
+                    history.push(rig::message::Message::Assistant {
+                        id: None,
+                        content: OneOrMany::one(rig::message::AssistantContent::text(
+                            "[acknowledged — working on it in background]",
+                        )),
+                    });
+                }
+                drop(history);
+            }
 
-            let prompt_engine = self.deps.runtime_config.prompts.load();
-            let correction = prompt_engine.render_system_tool_syntax_correction()?;
-            result = self
-                .hook
-                .prompt_once(&agent, &mut history, &correction)
-                .await;
+            // Clone history out so the write lock is released before the agentic loop.
+            // The branch tool needs a read lock on history to clone it for the branch,
+            // and holding a write lock across the entire agentic loop would deadlock.
+            let mut history = {
+                let guard = self.state.history.read().await;
+                guard.clone()
+            };
+            let history_len_before = history.len();
+
+            // ── Prompt snapshot capture (fire-and-forget) ──
+            self.maybe_capture_snapshot(system_prompt, user_text, &history);
+
+            let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+
+            // If the LLM responded with text that looks like tool call syntax, it failed
+            // to use the tool calling API. Inject a correction and retry a couple
+            // times so the model can recover by calling `reply` or `skip`.
+            const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
+            let mut recovery_attempts = 0;
+            while let Ok(ref response) = result {
+                if !crate::tools::should_block_user_visible_text(response)
+                    || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
+                {
+                    break;
+                }
+
+                recovery_attempts += 1;
+                tracing::warn!(
+                    channel_id = %self.id,
+                    attempt = recovery_attempts,
+                    "LLM emitted blocked structured output, retrying with correction"
+                );
+
+                let prompt_engine = self.deps.runtime_config.prompts.load();
+                let correction = prompt_engine.render_system_tool_syntax_correction()?;
+                result = self
+                    .hook
+                    .prompt_once(&agent, &mut history, &correction)
+                    .await;
+            }
+
+            let retrigger_reply_preserved = {
+                let mut guard = self.state.history.write().await;
+                apply_history_after_turn(
+                    &result,
+                    &mut guard,
+                    history,
+                    history_len_before,
+                    &self.id,
+                    is_retrigger,
+                )
+            };
+
+            Ok((result, retrigger_reply_preserved))
         }
+        .await;
 
-        let retrigger_reply_preserved = {
-            let mut guard = self.state.history.write().await;
-            apply_history_after_turn(
-                &result,
-                &mut guard,
-                history,
-                history_len_before,
-                &self.id,
-                is_retrigger,
-            )
-        };
-
-        if let Err(error) =
-            crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+        if let Err(error) = crate::tools::remove_channel_tools(
+            &self.tool_server,
+            allow_direct_reply,
+            &self.state,
+            self.emergency_override_mode,
+        )
+        .await
         {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
+        let (result, retrigger_reply_preserved) = turn_result?;
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
@@ -2384,6 +2693,7 @@ impl Channel {
     async fn send_outbound_text(&self, text: String, error_context: &str) {
         match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
+                self.complete_active_channel_run_if_any();
                 #[cfg(feature = "metrics")]
                 {
                     let channel_type = self.current_adapter().unwrap_or("unknown");
@@ -2498,6 +2808,7 @@ impl Channel {
                 } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
+                    self.complete_active_channel_run_if_any();
                     #[cfg(feature = "metrics")]
                     metrics
                         .messages_sent_total
@@ -2605,6 +2916,18 @@ impl Channel {
                             );
                             self.send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
+                        } else if self.has_active_channel_run() {
+                            let fallback = "I completed tool execution but no final summary was generated. Say \"summarize last run\" and I will compile the results from the direct execution card.".to_string();
+                            self.state.conversation_logger.log_bot_message_with_name(
+                                &self.state.channel_id,
+                                &fallback,
+                                Some(self.agent_display_name()),
+                            );
+                            self.send_outbound_text(
+                                fallback,
+                                "failed to send silent-direct-run fallback",
+                            )
+                            .await;
                         }
                     }
 
@@ -2621,6 +2944,7 @@ impl Channel {
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
+                    self.complete_active_channel_run_if_any();
                     #[cfg(feature = "metrics")]
                     metrics
                         .messages_sent_total
@@ -2840,6 +3164,42 @@ impl Channel {
                     worker_id = %worker_id,
                     "interactive worker result queued for retrigger"
                 );
+            }
+            ProcessEvent::ToolStarted {
+                process_id,
+                tool_name,
+                args,
+                ..
+            } => {
+                if let ProcessId::Channel(process_channel_id) = process_id {
+                    if process_channel_id == &self.id {
+                        let run_id = self.ensure_active_channel_run_id(run_logger);
+                        run_logger.log_channel_tool_started(
+                            &self.id,
+                            &run_id,
+                            tool_name,
+                            args,
+                        );
+                    }
+                }
+            }
+            ProcessEvent::ToolCompleted {
+                process_id,
+                tool_name,
+                result,
+                ..
+            } => {
+                if let ProcessId::Channel(process_channel_id) = process_id {
+                    if process_channel_id == &self.id {
+                        let run_id = self.ensure_active_channel_run_id(run_logger);
+                        run_logger.log_channel_tool_completed(
+                            &self.id,
+                            &run_id,
+                            tool_name,
+                            result,
+                        );
+                    }
+                }
             }
             _ => {}
         }
@@ -3255,6 +3615,39 @@ fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (
     (invoked_by_command, invoked_by_mention, invoked_by_reply)
 }
 
+fn admin_identity_matches_message(
+    admin_identities: &[ChannelAdminIdentity],
+    message: &InboundMessage,
+) -> bool {
+    let source = message.source.trim().to_ascii_lowercase();
+    let sender_id = message.sender_id.trim();
+    let adapter_selector = message.adapter_selector();
+    let adapter_key = message.adapter_key();
+
+    admin_identities.iter().any(|identity| {
+        if identity.source != source || identity.sender_id != sender_id {
+            return false;
+        }
+
+        match identity.adapter.as_deref() {
+            None => adapter_selector.is_none(),
+            Some(expected) => adapter_selector == Some(expected) || adapter_key == expected,
+        }
+    })
+}
+
+fn redact_override_command(raw_text: &str) -> String {
+    let trimmed = raw_text.trim();
+    if trimmed.eq_ignore_ascii_case("/override on")
+        || trimmed.eq_ignore_ascii_case("/override off")
+        || trimmed.eq_ignore_ascii_case("/override status")
+    {
+        "/override [redacted]".to_string()
+    } else {
+        raw_text.to_string()
+    }
+}
+
 fn looks_like_liveness_ping(text: &str) -> bool {
     let text = text.trim().to_lowercase();
     text.contains("you here")
@@ -3309,10 +3702,11 @@ fn should_send_quiet_mode_fallback(
 #[cfg(test)]
 mod tests {
     use super::{
-        QuietModeFallbackState, compute_listen_mode_invocation, recv_channel_event,
-        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
-        should_send_quiet_mode_fallback,
+        QuietModeFallbackState, admin_identity_matches_message, compute_listen_mode_invocation,
+        recv_channel_event, redact_override_command, should_process_event_for_channel,
+        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
+    use crate::config::ChannelAdminIdentity;
     use crate::memory::MemoryType;
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
     use std::collections::HashMap;
@@ -3340,6 +3734,58 @@ mod tests {
             metadata: message_metadata,
             formatted_author: None,
         }
+    }
+
+    #[test]
+    fn admin_identity_matches_named_adapter_sender_and_source() {
+        let message = InboundMessage {
+            adapter: Some("discord:work".into()),
+            sender_id: "123456789".into(),
+            ..inbound_message("discord", &[], "/override on")
+        };
+        let admins = vec![ChannelAdminIdentity {
+            source: "discord".to_string(),
+            adapter: Some("work".to_string()),
+            sender_id: "123456789".to_string(),
+        }];
+
+        assert!(admin_identity_matches_message(&admins, &message));
+    }
+
+    #[test]
+    fn admin_identity_rejects_wrong_adapter() {
+        let message = InboundMessage {
+            adapter: Some("discord:ops".into()),
+            sender_id: "123456789".into(),
+            ..inbound_message("discord", &[], "/override on")
+        };
+        let admins = vec![ChannelAdminIdentity {
+            source: "discord".to_string(),
+            adapter: Some("work".to_string()),
+            sender_id: "123456789".to_string(),
+        }];
+
+        assert!(!admin_identity_matches_message(&admins, &message));
+    }
+
+    #[test]
+    fn override_commands_are_redacted_for_persistence() {
+        assert_eq!(
+            redact_override_command("/override on"),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("/override off"),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("  /override status  "),
+            "/override [redacted]"
+        );
+        assert_eq!(
+            redact_override_command("/override maybe"),
+            "/override maybe".to_string()
+        );
     }
 
     #[tokio::test]

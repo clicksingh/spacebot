@@ -11,11 +11,11 @@ use super::providers::{
 };
 use super::toml_schema::*;
 use super::{
-    AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
-    CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
-    DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
-    LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SignalConfig,
+    AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelAdminIdentity, ChannelConfig,
+    ClosePolicy, CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig,
+    DiscordConfig, DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef,
+    IngestionConfig, LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig,
+    MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SignalConfig,
     SignalInstanceConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
     TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
     WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
@@ -64,6 +64,36 @@ static RESOLVE_SECRETS_STORE: std::sync::LazyLock<
 /// Set the secrets store for config resolution (process-wide, any thread).
 pub fn set_resolve_secrets_store(store: std::sync::Arc<crate::secrets::store::SecretsStore>) {
     RESOLVE_SECRETS_STORE.store(std::sync::Arc::new(Some(store)));
+}
+
+fn normalize_admin_identities(
+    identities: Vec<TomlChannelAdminIdentity>,
+    context: &str,
+) -> Vec<ChannelAdminIdentity> {
+    identities
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, identity)| {
+            let normalized = ChannelAdminIdentity {
+                source: identity.source.trim().to_ascii_lowercase(),
+                adapter: normalize_adapter(identity.adapter),
+                sender_id: identity.sender_id.trim().to_string(),
+            };
+
+            if normalized.source.is_empty() || normalized.sender_id.is_empty() {
+                tracing::warn!(
+                    %context,
+                    index,
+                    raw_source = %identity.source,
+                    raw_sender_id = %identity.sender_id,
+                    "skipping invalid admin identity (empty source or sender_id)"
+                );
+                return None;
+            }
+
+            Some(normalized)
+        })
+        .collect()
 }
 
 /// Known top-level keys in config.toml (must match `TomlConfig` field names).
@@ -1538,8 +1568,16 @@ impl Config {
                     save_attachments: channel_config
                         .save_attachments
                         .unwrap_or(base_defaults.channel.save_attachments),
+                    admin_identities: if channel_config.admin_identities.is_empty() {
+                        base_defaults.channel.admin_identities.clone()
+                    } else {
+                        normalize_admin_identities(
+                            channel_config.admin_identities,
+                            "defaults.channel.admin_identities",
+                        )
+                    },
                 })
-                .unwrap_or(base_defaults.channel),
+                .unwrap_or_else(|| base_defaults.channel.clone()),
             mcp: default_mcp,
             brave_search_key: toml
                 .defaults
@@ -1627,6 +1665,7 @@ impl Config {
             .agents
             .into_iter()
             .map(|a| -> Result<AgentConfig> {
+                let agent_id_for_context = a.id.clone();
                 // Per-agent routing resolves against instance defaults
                 let agent_routing = a
                     .routing
@@ -1743,6 +1782,17 @@ impl Config {
                         save_attachments: channel_config
                             .save_attachments
                             .unwrap_or(defaults.channel.save_attachments),
+                        admin_identities: if channel_config.admin_identities.is_empty() {
+                            defaults.channel.admin_identities.clone()
+                        } else {
+                            normalize_admin_identities(
+                                channel_config.admin_identities,
+                                &format!(
+                                    "agents.{}.channel.admin_identities",
+                                    agent_id_for_context
+                                ),
+                            )
+                        },
                     }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(

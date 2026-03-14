@@ -216,7 +216,25 @@ export interface TimelineWorkerRun {
 	completed_at: string | null;
 }
 
-export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun;
+export interface TimelineChannelToolCall {
+	id: string;
+	name: string;
+	args: string;
+	result: string | null;
+	status: string;
+}
+
+export interface TimelineChannelRun {
+	type: "channel_run";
+	id: string;
+	tool_calls: TimelineChannelToolCall[];
+	tool_calls_count: number;
+	status: string;
+	started_at: string;
+	completed_at: string | null;
+}
+
+export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun | TimelineChannelRun;
 
 export interface MessagesResponse {
 	items: TimelineItem[];

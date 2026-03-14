@@ -605,6 +605,66 @@ pub fn register_file_tools(
         .tool(FileListTool { context })
 }
 
+/// Add all file tools to an existing `ToolServerHandle`.
+///
+/// Used by channel emergency override mode where tools are mounted dynamically
+/// per turn on an already-running tool server.
+pub async fn add_file_tools_to_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+    workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    async fn rollback_file_tools(handle: &rig::tool::server::ToolServerHandle, names: &[&str]) {
+        for name in names.iter().rev() {
+            if let Err(error) = handle.remove_tool(name).await {
+                tracing::warn!(%error, tool_name = %name, "failed to roll back file tool");
+            }
+        }
+    }
+
+    let context = FileContext::new(workspace, sandbox);
+    let mut added_tools: Vec<&str> = Vec::new();
+
+    if let Err(error) = handle
+        .add_tool(FileReadTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileReadTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(FileWriteTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileWriteTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(FileEditTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(FileEditTool::NAME);
+
+    if let Err(error) = handle.add_tool(FileListTool { context }).await {
+        rollback_file_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
 // Legacy types (used by system-internal callers)
 
 /// File entry metadata (legacy).

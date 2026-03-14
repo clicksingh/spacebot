@@ -391,6 +391,15 @@ pub(super) struct TomlBrowserConfig {
 pub(super) struct TomlChannelConfig {
     pub(super) listen_only_mode: Option<bool>,
     pub(super) save_attachments: Option<bool>,
+    #[serde(default)]
+    pub(super) admin_identities: Vec<TomlChannelAdminIdentity>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlChannelAdminIdentity {
+    pub(super) source: String,
+    pub(super) adapter: Option<String>,
+    pub(super) sender_id: String,
 }
 
 #[derive(Deserialize)]

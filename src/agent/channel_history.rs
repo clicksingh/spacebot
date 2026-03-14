@@ -4,7 +4,7 @@
 //! history reconciliation after LLM turns, user message formatting,
 //! reply extraction from cancelled turns, and event filtering.
 
-use crate::{ChannelId, InboundMessage, ProcessEvent};
+use crate::{ChannelId, InboundMessage, ProcessEvent, ProcessId};
 
 /// Write history back after the agentic loop completes.
 ///
@@ -382,14 +382,6 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
             channel_id: event_channel,
             ..
         }
-        | ProcessEvent::ToolStarted {
-            channel_id: event_channel,
-            ..
-        }
-        | ProcessEvent::ToolCompleted {
-            channel_id: event_channel,
-            ..
-        }
         | ProcessEvent::MemorySaved {
             channel_id: event_channel,
             ..
@@ -402,6 +394,19 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
             channel_id: event_channel,
             ..
         } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::ToolStarted {
+            channel_id: event_channel,
+            process_id,
+            ..
+        }
+        | ProcessEvent::ToolCompleted {
+            channel_id: event_channel,
+            process_id,
+            ..
+        } => {
+            event_channel.as_ref() == Some(channel_id)
+                || matches!(process_id, ProcessId::Channel(pid) if pid == channel_id)
+        }
         ProcessEvent::CompactionTriggered {
             channel_id: event_channel,
             ..
@@ -1100,6 +1105,20 @@ mod tests {
 
         assert!(event_is_for_channel(&related_event, &channel_id));
         assert!(!event_is_for_channel(&unrelated_event, &channel_id));
+    }
+
+    #[test]
+    fn event_filter_accepts_channel_tool_events_without_channel_id() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::ToolStarted {
+            agent_id: Arc::from("agent"),
+            process_id: ProcessId::Channel(channel_id.clone()),
+            channel_id: None,
+            tool_name: "shell".to_string(),
+            args: "{}".to_string(),
+        };
+
+        assert!(event_is_for_channel(&event, &channel_id));
     }
 
     #[test]

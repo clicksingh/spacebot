@@ -249,6 +249,9 @@ async fn dump_channel_context() {
         live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        emergency_mcp_tool_names: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashSet::new(),
+        )),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -266,6 +269,7 @@ async fn dump_channel_context() {
         true,
         None,
         None,
+        false,
     )
     .await
     .expect("failed to add channel tools");
@@ -489,6 +493,9 @@ async fn dump_all_contexts() {
         live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        emergency_mcp_tool_names: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashSet::new(),
+        )),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
@@ -505,6 +512,7 @@ async fn dump_all_contexts() {
         true,
         None,
         None,
+        false,
     )
     .await
     .expect("failed to add channel tools");

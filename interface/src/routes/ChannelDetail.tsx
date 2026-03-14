@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
-import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type ActiveBranch } from "@/hooks/useChannelLiveState";
+import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineChannelRun, type TimelineWorkerRun } from "@/api/client";
+import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type ActiveBranch, type ActiveChannelExecution } from "@/hooks/useChannelLiveState";
 import { useIsMobile } from "@/hooks/useViewport";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
 import { PromptInspectModal } from "@/components/PromptInspectModal";
+import { ToolCall, type ToolCallPair } from "@/components/ToolCall";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 import { Button } from "@/ui";
 import { Cancel01Icon, IdeaIcon, CodeIcon } from "@hugeicons/core-free-icons";
@@ -239,6 +240,111 @@ function WorkerRunItem({ item, agentId }: { item: TimelineWorkerRun; agentId: st
 	);
 }
 
+function parseToolJson(text: string): Record<string, unknown> | null {
+	if (!text || text.trim().length === 0) return null;
+	try {
+		const parsed = JSON.parse(text);
+		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+function ChannelExecutionCard({ execution, isTyping, channelId }: { execution: ActiveChannelExecution | null; isTyping: boolean; channelId: string }) {
+	if (!execution) return null;
+	const [expanded, setExpanded] = useState(false);
+
+	const pairs: ToolCallPair[] = execution.calls.map((call) => ({
+		id: call.id,
+		name: call.name,
+		argsRaw: call.args,
+		args: parseToolJson(call.args),
+		resultRaw: call.result,
+		result: call.result ? parseToolJson(call.result) : null,
+		status: call.status,
+	}));
+
+	const showLive = isTyping || execution.currentTool !== null;
+	const running = isTyping || execution.currentTool !== null || execution.calls.some((call) => call.status === "running");
+
+	return (
+		<div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
+			<button
+				type="button"
+				onClick={() => setExpanded((value) => !value)}
+				className="flex w-full min-w-0 items-center gap-2 text-left text-tiny text-emerald-200"
+			>
+				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+				<span>Direct channel execution</span>
+				{execution.toolCalls > 0 && <span className="text-emerald-300/75">{execution.toolCalls} tool calls</span>}
+				{execution.currentTool && <span className="min-w-0 flex-1 truncate text-emerald-300/85">{execution.currentTool}</span>}
+				{running && (
+					<button
+						type="button"
+						onClick={(event) => {
+							event.stopPropagation();
+							api.cancelProcess(channelId, "channel", channelId).catch(console.warn);
+						}}
+						className="rounded border border-red-400/40 px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
+					>
+						Cancel
+					</button>
+				)}
+				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
+			</button>
+			{expanded && (
+				<>
+					{showLive && (
+						<div className="mt-2 flex items-center gap-1.5 py-1">
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+						</div>
+					)}
+					<div className="mt-2 max-h-[55vh] overflow-y-auto pr-1 sm:max-h-[60vh]">
+						<div className="flex flex-col gap-1.5">
+							{pairs.map((pair) => (
+								<ToolCall key={pair.id} pair={pair} />
+							))}
+						</div>
+					</div>
+				</>
+			)}
+		</div>
+	);
+}
+
+function PersistedChannelRunItem({ item, channelId }: { item: TimelineChannelRun; channelId: string }) {
+	const execution: ActiveChannelExecution = {
+		id: item.id,
+		startedAt: new Date(item.started_at).getTime(),
+		completedAt: item.completed_at ? new Date(item.completed_at).getTime() : null,
+		currentTool: null,
+		toolCalls: item.tool_calls_count,
+		calls: item.tool_calls.map((call) => ({
+			id: call.id,
+			name: call.name,
+			args: call.args,
+			result: call.result,
+			status: call.status === "running" ? "running" : "completed",
+		})),
+	};
+
+	return (
+		<div className="flex gap-3 px-3 py-2">
+			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
+				{formatTimestamp(new Date(item.started_at).getTime())}
+			</span>
+			<div className="min-w-0 flex-1">
+				<ChannelExecutionCard execution={execution} isTyping={false} channelId={channelId} />
+			</div>
+		</div>
+	);
+}
+
 function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
@@ -279,6 +385,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: 
 			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
 			return <WorkerRunItem item={item} agentId={agentId} />;
 		}
+		case "channel_run":
+			return <PersistedChannelRunItem item={item} channelId={channelId} />;
 	}
 }
 
@@ -290,8 +398,12 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const workers = liveState?.workers ?? {};
 	const branches = liveState?.branches ?? {};
 	const activeWorkerCount = Object.keys(workers).length;
+	const execution = liveState?.channelExecution ?? null;
+	const executionHistory = liveState?.channelExecutionHistory ?? [];
+	const hasDirectExecution = Boolean(execution && (execution.calls.length > 0 || execution.currentTool));
+	const hasDirectHistory = executionHistory.length > 0;
 	const activeBranchCount = Object.keys(branches).length;
-	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
+	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0 || hasDirectExecution || hasDirectHistory;
 	const [cortexOpen, setCortexOpen] = useState(false);
 	const [inspectOpen, setInspectOpen] = useState(false);
 	const isMobile = useIsMobile();
@@ -365,6 +477,12 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 										</span>
 									</div>
 								)}
+								{hasDirectExecution && (
+									<div className="flex items-center gap-1.5">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+										<span className="text-tiny text-emerald-300">direct</span>
+									</div>
+								)}
 								{activeBranchCount > 0 && (
 									<div className="flex items-center gap-1.5">
 										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
@@ -405,6 +523,22 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 						</div>
 					</div>
 				</div>
+
+				{hasDirectExecution && (
+					<div className="border-b border-app-line/50 px-3 py-2 sm:px-6">
+						<ChannelExecutionCard execution={execution} isTyping={isTyping} channelId={channelId} />
+					</div>
+				)}
+
+				{hasDirectHistory && (
+					<div className="border-b border-app-line/50 px-3 py-2 sm:px-6">
+						<div className="flex flex-col gap-2">
+							{executionHistory.map((run) => (
+								<ChannelExecutionCard key={run.id} execution={run} isTyping={false} channelId={channelId} />
+							))}
+						</div>
+					</div>
+				)}
 
 				{/* Timeline — flex-col-reverse keeps scroll pinned to bottom */}
 				<div ref={scrollRef} className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto">

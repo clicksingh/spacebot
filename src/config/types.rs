@@ -795,8 +795,19 @@ impl Default for BrowserConfig {
     }
 }
 
+/// A privileged identity allowed to execute channel admin commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelAdminIdentity {
+    /// Messaging source (discord/slack/telegram/signal/webchat/email/etc).
+    pub source: String,
+    /// Runtime adapter selector (named adapter), if any.
+    pub adapter: Option<String>,
+    /// Platform-specific user identifier from inbound messages.
+    pub sender_id: String,
+}
+
 /// Channel behavior configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChannelConfig {
     /// When true, unsolicited chat messages are ignored unless command/mention/reply.
     pub listen_only_mode: bool,
@@ -804,6 +815,9 @@ pub struct ChannelConfig {
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
     pub save_attachments: bool,
+    /// Admin identities allowed to run sensitive built-in channel commands
+    /// (e.g. emergency override mode toggles).
+    pub admin_identities: Vec<ChannelAdminIdentity>,
 }
 
 /// OpenCode subprocess worker configuration.
@@ -1287,7 +1301,10 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
-            channel: self.channel.unwrap_or(defaults.channel),
+            channel: self
+                .channel
+                .clone()
+                .unwrap_or_else(|| defaults.channel.clone()),
             mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key

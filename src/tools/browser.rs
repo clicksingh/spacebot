@@ -2143,6 +2143,203 @@ pub fn register_browser_tools(
         .tool(BrowserCloseTool { context })
 }
 
+fn build_browser_context(
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    runtime_config: &crate::config::RuntimeConfig,
+) -> BrowserContext {
+    let state = if let Some(shared) = runtime_config
+        .shared_browser
+        .as_ref()
+        .filter(|_| config.persist_session)
+    {
+        shared.clone()
+    } else {
+        Arc::new(Mutex::new(BrowserState::new()))
+    };
+
+    let secrets = runtime_config.secrets.load().as_ref().as_ref().cloned();
+    BrowserContext::new(state, config, screenshot_dir, secrets)
+}
+
+/// Add all browser tools to an existing running tool server handle.
+pub async fn add_browser_tools_to_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    runtime_config: &crate::config::RuntimeConfig,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    async fn rollback_browser_tools(handle: &rig::tool::server::ToolServerHandle, names: &[&str]) {
+        for name in names.iter().rev() {
+            if let Err(error) = handle.remove_tool(name).await {
+                tracing::warn!(%error, tool_name = %name, "failed to roll back browser tool");
+            }
+        }
+    }
+
+    let context = build_browser_context(config, screenshot_dir, runtime_config);
+    let mut added_tools: Vec<&str> = Vec::new();
+
+    if let Err(error) = handle
+        .add_tool(BrowserLaunchTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserLaunchTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserNavigateTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserNavigateTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserSnapshotTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserSnapshotTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserClickTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserClickTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserTypeTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserTypeTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserPressKeyTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserPressKeyTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserScreenshotTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserScreenshotTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserEvaluateTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserEvaluateTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserTabOpenTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserTabOpenTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserTabListTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserTabListTool::NAME);
+
+    if let Err(error) = handle
+        .add_tool(BrowserTabCloseTool {
+            context: context.clone(),
+        })
+        .await
+    {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    added_tools.push(BrowserTabCloseTool::NAME);
+
+    if let Err(error) = handle.add_tool(BrowserCloseTool { context }).await {
+        rollback_browser_tools(handle, &added_tools).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Remove all browser tools from an existing running tool server handle.
+pub async fn remove_browser_tools_from_handle(
+    handle: &rig::tool::server::ToolServerHandle,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let mut first_error = None;
+    for tool_name in [
+        BrowserLaunchTool::NAME,
+        BrowserNavigateTool::NAME,
+        BrowserSnapshotTool::NAME,
+        BrowserClickTool::NAME,
+        BrowserTypeTool::NAME,
+        BrowserPressKeyTool::NAME,
+        BrowserScreenshotTool::NAME,
+        BrowserEvaluateTool::NAME,
+        BrowserTabOpenTool::NAME,
+        BrowserTabListTool::NAME,
+        BrowserTabCloseTool::NAME,
+        BrowserCloseTool::NAME,
+    ] {
+        if let Err(error) = handle.remove_tool(tool_name).await {
+            tracing::warn!(%error, %tool_name, "failed to remove browser tool");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
 // Shared helpers
 
 /// Get the active page, or create a first one if the browser has no pages yet.
