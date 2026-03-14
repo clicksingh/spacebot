@@ -534,14 +534,35 @@ impl ProcessRunLogger {
     }
 
     /// Append a started tool call to a direct channel run. Fire-and-forget.
-    pub fn log_channel_tool_started(&self, run_id: &str, tool_name: &str, args: &str) {
+    pub fn log_channel_tool_started(
+        &self,
+        channel_id: &ChannelId,
+        run_id: &str,
+        tool_name: &str,
+        args: &str,
+    ) {
         let pool = self.pool.clone();
+        let channel_id = channel_id.to_string();
         let run_id = run_id.to_string();
         let tool_name = tool_name.to_string();
         let args = args.to_string();
         let call_id = uuid::Uuid::new_v4().to_string();
 
         tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO channel_runs (id, channel_id, tool_calls_json, tool_calls_count, status) \
+                 VALUES (?, ?, '[]', 0, 'running') \
+                 ON CONFLICT(id) DO UPDATE SET status = 'running'",
+            )
+            .bind(&run_id)
+            .bind(&channel_id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, run_id = %run_id, "failed to upsert channel run before tool-call start");
+                return;
+            }
+
             if let Err(error) = sqlx::query(
                 "INSERT INTO channel_run_tool_calls (id, run_id, name, args, status) \
                  VALUES (?, ?, ?, ?, 'running')",
@@ -569,13 +590,34 @@ impl ProcessRunLogger {
     }
 
     /// Mark the most recent matching running tool call as completed. Fire-and-forget.
-    pub fn log_channel_tool_completed(&self, run_id: &str, tool_name: &str, result: &str) {
+    pub fn log_channel_tool_completed(
+        &self,
+        channel_id: &ChannelId,
+        run_id: &str,
+        tool_name: &str,
+        result: &str,
+    ) {
         let pool = self.pool.clone();
+        let channel_id = channel_id.to_string();
         let run_id = run_id.to_string();
         let tool_name = tool_name.to_string();
         let result = result.to_string();
 
         tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO channel_runs (id, channel_id, tool_calls_json, tool_calls_count, status) \
+                 VALUES (?, ?, '[]', 0, 'running') \
+                 ON CONFLICT(id) DO NOTHING",
+            )
+            .bind(&run_id)
+            .bind(&channel_id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, run_id = %run_id, "failed to ensure channel run before tool-call completion");
+                return;
+            }
+
             let update_result = sqlx::query(
                 "UPDATE channel_run_tool_calls \
                  SET status = 'completed', result = ?, completed_at = CURRENT_TIMESTAMP \
@@ -636,21 +678,51 @@ impl ProcessRunLogger {
     }
 
     /// Mark a direct channel run completed. Fire-and-forget.
-    pub fn log_channel_run_completed(&self, run_id: &str) {
+    pub fn log_channel_run_completed(&self, channel_id: &ChannelId, run_id: &str) {
         let pool = self.pool.clone();
+        let channel_id = channel_id.to_string();
         let run_id = run_id.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO channel_runs (id, channel_id, tool_calls_json, tool_calls_count, status, completed_at) \
+                 VALUES (?, ?, '[]', 0, 'done', CURRENT_TIMESTAMP) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                    status = 'done', \
+                    completed_at = COALESCE(channel_runs.completed_at, CURRENT_TIMESTAMP)",
+            )
+            .bind(&run_id)
+            .bind(&channel_id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, run_id = %run_id, "failed to persist channel run completion");
+            }
+        });
+    }
+
+    /// Mark the most recent running direct channel run as done for a channel.
+    /// Used as a fallback when in-memory run ID tracking lags behind event delivery.
+    pub fn log_latest_channel_run_completed(&self, channel_id: &ChannelId) {
+        let pool = self.pool.clone();
+        let channel_id = channel_id.to_string();
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
                 "UPDATE channel_runs \
                  SET status = 'done', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
-                 WHERE id = ?",
+                 WHERE id = ( \
+                     SELECT id FROM channel_runs \
+                     WHERE channel_id = ? AND status = 'running' \
+                     ORDER BY started_at DESC \
+                     LIMIT 1 \
+                 )",
             )
-            .bind(&run_id)
+            .bind(&channel_id)
             .execute(&pool)
             .await
             {
-                tracing::warn!(%error, run_id = %run_id, "failed to persist channel run completion");
+                tracing::warn!(%error, channel_id = %channel_id, "failed to complete latest channel run");
             }
         });
     }

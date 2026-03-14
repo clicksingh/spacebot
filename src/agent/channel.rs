@@ -970,7 +970,11 @@ impl Channel {
         if let Some(run_id) = run_id {
             self.state
                 .process_run_logger
-                .log_channel_run_completed(&run_id);
+                .log_channel_run_completed(&self.id, &run_id);
+        } else {
+            self.state
+                .process_run_logger
+                .log_latest_channel_run_completed(&self.id);
         }
     }
 
@@ -3156,7 +3160,12 @@ impl Channel {
                 if let ProcessId::Channel(process_channel_id) = process_id {
                     if process_channel_id == &self.id {
                         let run_id = self.ensure_active_channel_run_id(run_logger);
-                        run_logger.log_channel_tool_started(&run_id, tool_name, args);
+                        run_logger.log_channel_tool_started(
+                            &self.id,
+                            &run_id,
+                            tool_name,
+                            args,
+                        );
                     }
                 }
             }
@@ -3169,7 +3178,12 @@ impl Channel {
                 if let ProcessId::Channel(process_channel_id) = process_id {
                     if process_channel_id == &self.id {
                         let run_id = self.ensure_active_channel_run_id(run_logger);
-                        run_logger.log_channel_tool_completed(&run_id, tool_name, result);
+                        run_logger.log_channel_tool_completed(
+                            &self.id,
+                            &run_id,
+                            tool_name,
+                            result,
+                        );
                     }
                 }
             }
