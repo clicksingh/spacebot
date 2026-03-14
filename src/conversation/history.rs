@@ -542,54 +542,28 @@ impl ProcessRunLogger {
         let call_id = uuid::Uuid::new_v4().to_string();
 
         tokio::spawn(async move {
-            let row = sqlx::query("SELECT tool_calls_json FROM channel_runs WHERE id = ?")
-                .bind(&run_id)
-                .fetch_optional(&pool)
-                .await;
-
-            let Some(row) = (match row {
-                Ok(row) => row,
-                Err(error) => {
-                    tracing::warn!(%error, run_id = %run_id, "failed to load channel run tool calls");
-                    return;
-                }
-            }) else {
-                tracing::debug!(run_id = %run_id, "channel run row not found for tool start");
-                return;
-            };
-
-            let tool_calls_json: String = row
-                .try_get("tool_calls_json")
-                .unwrap_or_else(|_| "[]".into());
-            let mut calls: Vec<ChannelRunToolCall> =
-                serde_json::from_str(&tool_calls_json).unwrap_or_default();
-            calls.push(ChannelRunToolCall {
-                id: call_id,
-                name: tool_name.clone(),
-                args,
-                result: None,
-                status: "running".to_string(),
-            });
-
-            let updated_json = match serde_json::to_string(&calls) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(%error, run_id = %run_id, "failed to serialize channel tool calls");
-                    return;
-                }
-            };
-
             if let Err(error) = sqlx::query(
-                "UPDATE channel_runs \
-                 SET tool_calls_json = ?, status = 'running' \
-                 WHERE id = ?",
+                "INSERT INTO channel_run_tool_calls (id, run_id, name, args, status) \
+                 VALUES (?, ?, ?, ?, 'running')",
             )
-            .bind(&updated_json)
+            .bind(&call_id)
             .bind(&run_id)
+            .bind(&tool_name)
+            .bind(&args)
             .execute(&pool)
             .await
             {
-                tracing::warn!(%error, run_id = %run_id, "failed to persist channel tool start");
+                tracing::warn!(%error, run_id = %run_id, "failed to persist channel tool-call start");
+                return;
+            }
+
+            if let Err(error) =
+                sqlx::query("UPDATE channel_runs SET status = 'running' WHERE id = ?")
+                    .bind(&run_id)
+                    .execute(&pool)
+                    .await
+            {
+                tracing::warn!(%error, run_id = %run_id, "failed to mark channel run as running");
             }
         });
     }
@@ -602,75 +576,63 @@ impl ProcessRunLogger {
         let result = result.to_string();
 
         tokio::spawn(async move {
-            let row = sqlx::query(
-                "SELECT tool_calls_json, tool_calls_count FROM channel_runs WHERE id = ?",
+            let update_result = sqlx::query(
+                "UPDATE channel_run_tool_calls \
+                 SET status = 'completed', result = ?, completed_at = CURRENT_TIMESTAMP \
+                 WHERE id = ( \
+                    SELECT id FROM channel_run_tool_calls \
+                    WHERE run_id = ? AND name = ? AND status = 'running' \
+                    ORDER BY created_at DESC \
+                    LIMIT 1 \
+                 )",
             )
+            .bind(&result)
             .bind(&run_id)
-            .fetch_optional(&pool)
+            .bind(&tool_name)
+            .execute(&pool)
             .await;
 
-            let Some(row) = (match row {
-                Ok(row) => row,
+            let rows_affected = match update_result {
+                Ok(result) => result.rows_affected(),
                 Err(error) => {
-                    tracing::warn!(%error, run_id = %run_id, "failed to load channel run for tool completion");
-                    return;
-                }
-            }) else {
-                tracing::debug!(run_id = %run_id, "channel run row not found for tool completion");
-                return;
-            };
-
-            let tool_calls_json: String = row
-                .try_get("tool_calls_json")
-                .unwrap_or_else(|_| "[]".into());
-            let mut calls: Vec<ChannelRunToolCall> =
-                serde_json::from_str(&tool_calls_json).unwrap_or_default();
-
-            let mut matched = false;
-            for call in calls.iter_mut().rev() {
-                if call.status == "running" && call.name == tool_name {
-                    call.status = "completed".to_string();
-                    call.result = Some(result.clone());
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                calls.push(ChannelRunToolCall {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: tool_name,
-                    args: String::new(),
-                    result: Some(result),
-                    status: "completed".to_string(),
-                });
-            }
-
-            let updated_json = match serde_json::to_string(&calls) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(%error, run_id = %run_id, "failed to serialize channel tool calls");
+                    tracing::warn!(%error, run_id = %run_id, "failed to update channel tool-call completion");
                     return;
                 }
             };
-            let completed_count = calls
-                .iter()
-                .filter(|call| call.status == "completed")
-                .count() as i64;
+
+            if rows_affected == 0 {
+                if let Err(error) = sqlx::query(
+                    "INSERT INTO channel_run_tool_calls (id, run_id, name, args, result, status, completed_at) \
+                     VALUES (?, ?, ?, '', ?, 'completed', CURRENT_TIMESTAMP)",
+                )
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(&run_id)
+                .bind(&tool_name)
+                .bind(&result)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(%error, run_id = %run_id, "failed to insert fallback completed tool-call row");
+                    return;
+                }
+            }
 
             if let Err(error) = sqlx::query(
                 "UPDATE channel_runs \
-                 SET tool_calls_json = ?, tool_calls_count = ?, status = 'running' \
+                 SET tool_calls_count = tool_calls_count + 1, status = 'running' \
                  WHERE id = ?",
             )
-            .bind(&updated_json)
-            .bind(completed_count)
             .bind(&run_id)
             .execute(&pool)
             .await
             {
-                tracing::warn!(%error, run_id = %run_id, "failed to persist channel tool completion");
+                tracing::warn!(%error, run_id = %run_id, "failed to increment channel tool call count");
             }
         });
+    }
+
+    fn parse_legacy_channel_tool_calls(tool_calls_json: &str) -> Vec<ChannelRunToolCall> {
+        serde_json::from_str(tool_calls_json).unwrap_or_default()
     }
 
     /// Mark a direct channel run completed. Fire-and-forget.
@@ -963,6 +925,53 @@ impl ProcessRunLogger {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
+        let channel_run_ids: Vec<String> = rows
+            .iter()
+            .filter_map(|row| {
+                let item_type: String = row.try_get("item_type").ok()?;
+                if item_type == "channel_run" {
+                    Some(row.try_get("id").unwrap_or_default())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let tool_calls_by_run: std::collections::HashMap<String, Vec<ChannelRunToolCall>> =
+            if channel_run_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                let placeholders = std::iter::repeat_n("?", channel_run_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let tool_query = format!(
+                    "SELECT id, run_id, name, args, result, status \
+                     FROM channel_run_tool_calls \
+                     WHERE run_id IN ({placeholders}) \
+                     ORDER BY created_at ASC"
+                );
+                let mut q = sqlx::query(&tool_query);
+                for run_id in &channel_run_ids {
+                    q = q.bind(run_id);
+                }
+                let tool_rows = q.fetch_all(&self.pool).await.map_err(|e| anyhow::anyhow!(e))?;
+                let mut grouped: std::collections::HashMap<String, Vec<ChannelRunToolCall>> =
+                    std::collections::HashMap::new();
+                for row in tool_rows {
+                    let run_id: String = row.try_get("run_id").unwrap_or_default();
+                    grouped.entry(run_id).or_default().push(ChannelRunToolCall {
+                        id: row.try_get("id").unwrap_or_default(),
+                        name: row.try_get("name").unwrap_or_default(),
+                        args: row.try_get("args").unwrap_or_default(),
+                        result: row.try_get("result").ok(),
+                        status: row
+                            .try_get::<String, _>("status")
+                            .unwrap_or_else(|_| "completed".to_string()),
+                    });
+                }
+                grouped
+            };
+
         let mut items: Vec<TimelineItem> = rows
             .into_iter()
             .filter_map(|row| {
@@ -1010,10 +1019,13 @@ impl ProcessRunLogger {
                         let tool_calls_json: String = row
                             .try_get("tool_calls_json")
                             .unwrap_or_else(|_| "[]".into());
-                        let tool_calls: Vec<ChannelRunToolCall> =
-                            serde_json::from_str(&tool_calls_json).unwrap_or_default();
+                        let run_id: String = row.try_get("id").unwrap_or_default();
+                        let tool_calls = tool_calls_by_run
+                            .get(&run_id)
+                            .cloned()
+                            .unwrap_or_else(|| Self::parse_legacy_channel_tool_calls(&tool_calls_json));
                         Some(TimelineItem::ChannelRun {
-                            id: row.try_get("id").unwrap_or_default(),
+                            id: run_id,
                             tool_calls_count: row.try_get("tool_calls_count").unwrap_or(0),
                             tool_calls,
                             status: row.try_get("status").unwrap_or_else(|_| "done".into()),
