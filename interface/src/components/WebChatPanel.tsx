@@ -74,9 +74,11 @@ function ActiveWorkersPanel({
 function ChannelExecutionPanel({
 	execution,
 	isTyping,
+	channelId,
 }: {
 	execution: ActiveChannelExecution | null | undefined;
 	isTyping: boolean;
+	channelId: string;
 }) {
 	if (!execution) return null;
 	const [expanded, setExpanded] = useState(false);
@@ -92,6 +94,7 @@ function ChannelExecutionPanel({
 	}));
 
 	const showLive = isTyping || execution.currentTool !== null;
+	const running = execution.currentTool !== null || execution.calls.some((call) => call.status === "running");
 
 	return (
 		<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
@@ -107,6 +110,18 @@ function ChannelExecutionPanel({
 				)}
 				{execution.currentTool && (
 					<span className="min-w-0 flex-1 truncate text-emerald-300/85">{execution.currentTool}</span>
+				)}
+				{running && (
+					<button
+						type="button"
+						onClick={(event) => {
+							event.stopPropagation();
+							api.cancelProcess(channelId, "channel", channelId).catch(console.warn);
+						}}
+						className="rounded border border-red-400/40 px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
+					>
+						Cancel
+					</button>
 				)}
 				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
 			</button>
@@ -382,6 +397,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const isTyping = liveState?.isTyping ?? false;
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const execution = liveState?.channelExecution;
+	const executionHistory = liveState?.channelExecutionHistory ?? [];
 	const hasActiveWorkers = activeWorkers.length > 0;
 	const inferredOverrideMode = useMemo(() => detectOverrideModeFromTimeline(timeline), [timeline]);
 
@@ -435,9 +451,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 							disabled={isSending || isTyping}
 						/>
 						{hasActiveWorkers && <ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />}
-						{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
-							<ChannelExecutionPanel execution={execution} isTyping={isTyping} />
-						)}
 					</div>
 
 					{timeline.length === 0 && !isTyping && (
@@ -469,6 +482,14 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 							</div>
 						);
 					})}
+
+					{executionHistory.map((run) => (
+						<ChannelExecutionPanel key={run.id} execution={run} isTyping={false} channelId={sessionId} />
+					))}
+
+					{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
+						<ChannelExecutionPanel execution={execution} isTyping={isTyping} channelId={sessionId} />
+					)}
 
 					{isTyping && !(execution && (execution.calls.length > 0 || execution.currentTool)) && <ThinkingIndicator />}
 

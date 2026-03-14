@@ -253,7 +253,7 @@ function parseToolJson(text: string): Record<string, unknown> | null {
 	}
 }
 
-function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChannelExecution | null; isTyping: boolean }) {
+function ChannelExecutionCard({ execution, isTyping, channelId }: { execution: ActiveChannelExecution | null; isTyping: boolean; channelId: string }) {
 	if (!execution) return null;
 	const [expanded, setExpanded] = useState(false);
 
@@ -268,6 +268,7 @@ function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChanne
 	}));
 
 	const showLive = isTyping || execution.currentTool !== null;
+	const running = execution.currentTool !== null || execution.calls.some((call) => call.status === "running");
 
 	return (
 		<div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
@@ -280,6 +281,18 @@ function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChanne
 				<span>Direct channel execution</span>
 				{execution.toolCalls > 0 && <span className="text-emerald-300/75">{execution.toolCalls} tool calls</span>}
 				{execution.currentTool && <span className="min-w-0 flex-1 truncate text-emerald-300/85">{execution.currentTool}</span>}
+				{running && (
+					<button
+						type="button"
+						onClick={(event) => {
+							event.stopPropagation();
+							api.cancelProcess(channelId, "channel", channelId).catch(console.warn);
+						}}
+						className="rounded border border-red-400/40 px-1.5 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
+					>
+						Cancel
+					</button>
+				)}
 				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
 			</button>
 			{expanded && (
@@ -356,9 +369,11 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const branches = liveState?.branches ?? {};
 	const activeWorkerCount = Object.keys(workers).length;
 	const execution = liveState?.channelExecution ?? null;
+	const executionHistory = liveState?.channelExecutionHistory ?? [];
 	const hasDirectExecution = Boolean(execution && (execution.calls.length > 0 || execution.currentTool));
+	const hasDirectHistory = executionHistory.length > 0;
 	const activeBranchCount = Object.keys(branches).length;
-	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0 || hasDirectExecution;
+	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0 || hasDirectExecution || hasDirectHistory;
 	const [cortexOpen, setCortexOpen] = useState(false);
 	const [inspectOpen, setInspectOpen] = useState(false);
 	const isMobile = useIsMobile();
@@ -481,7 +496,17 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 
 				{hasDirectExecution && (
 					<div className="border-b border-app-line/50 px-3 py-2 sm:px-6">
-						<ChannelExecutionCard execution={execution} isTyping={isTyping} />
+						<ChannelExecutionCard execution={execution} isTyping={isTyping} channelId={channelId} />
+					</div>
+				)}
+
+				{hasDirectHistory && (
+					<div className="border-b border-app-line/50 px-3 py-2 sm:px-6">
+						<div className="flex flex-col gap-2">
+							{executionHistory.map((run) => (
+								<ChannelExecutionCard key={run.id} execution={run} isTyping={false} channelId={channelId} />
+							))}
+						</div>
 					</div>
 				)}
 
