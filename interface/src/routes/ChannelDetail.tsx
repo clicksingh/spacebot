@@ -255,6 +255,7 @@ function parseToolJson(text: string): Record<string, unknown> | null {
 
 function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChannelExecution | null; isTyping: boolean }) {
 	if (!execution) return null;
+	const [expanded, setExpanded] = useState(false);
 
 	const pairs: ToolCallPair[] = execution.calls.map((call) => ({
 		id: call.id,
@@ -270,24 +271,33 @@ function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChanne
 
 	return (
 		<div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
-			<div className="mb-2 flex min-w-0 items-center gap-2 text-tiny text-emerald-200">
+			<button
+				type="button"
+				onClick={() => setExpanded((value) => !value)}
+				className="flex w-full min-w-0 items-center gap-2 text-left text-tiny text-emerald-200"
+			>
 				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
 				<span>Direct channel execution</span>
 				{execution.toolCalls > 0 && <span className="text-emerald-300/75">{execution.toolCalls} tool calls</span>}
 				{execution.currentTool && <span className="min-w-0 flex-1 truncate text-emerald-300/85">{execution.currentTool}</span>}
-			</div>
-			{showLive && (
-				<div className="mb-2 flex items-center gap-1.5 py-1">
-					<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
-					<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
-					<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
-				</div>
+				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
+			</button>
+			{expanded && (
+				<>
+					{showLive && (
+						<div className="mt-2 flex items-center gap-1.5 py-1">
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+						</div>
+					)}
+					<div className="mt-2 flex flex-col gap-1.5">
+						{pairs.map((pair) => (
+							<ToolCall key={pair.id} pair={pair} />
+						))}
+					</div>
+				</>
 			)}
-			<div className="flex flex-col gap-1.5">
-				{pairs.map((pair) => (
-					<ToolCall key={pair.id} pair={pair} />
-				))}
-			</div>
 		</div>
 	);
 }

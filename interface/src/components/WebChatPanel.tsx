@@ -79,6 +79,7 @@ function ChannelExecutionPanel({
 	isTyping: boolean;
 }) {
 	if (!execution) return null;
+	const [expanded, setExpanded] = useState(false);
 
 	const pairs: ToolCallPair[] = execution.calls.map((call) => ({
 		id: call.id,
@@ -94,22 +95,31 @@ function ChannelExecutionPanel({
 
 	return (
 		<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
-			<div className="mb-2 flex items-center gap-2 text-tiny text-emerald-200">
+			<button
+				type="button"
+				onClick={() => setExpanded((value) => !value)}
+				className="flex w-full min-w-0 items-center gap-2 text-left text-tiny text-emerald-200"
+			>
 				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
 				<span>Direct channel execution</span>
 				{execution.toolCalls > 0 && (
 					<span className="text-emerald-300/75">{execution.toolCalls} tool calls</span>
 				)}
 				{execution.currentTool && (
-					<span className="max-w-56 truncate text-emerald-300/85">{execution.currentTool}</span>
+					<span className="min-w-0 flex-1 truncate text-emerald-300/85">{execution.currentTool}</span>
 				)}
-			</div>
-			{showLive && <ThinkingIndicator />}
-			<div className="flex flex-col gap-1.5">
-				{pairs.map((pair) => (
-					<ToolCall key={pair.id} pair={pair} />
-				))}
-			</div>
+				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
+			</button>
+			{expanded && (
+				<>
+					{showLive && <ThinkingIndicator />}
+					<div className="mt-2 flex flex-col gap-1.5">
+						{pairs.map((pair) => (
+							<ToolCall key={pair.id} pair={pair} />
+						))}
+					</div>
+				</>
+			)}
 		</div>
 	);
 }
@@ -423,11 +433,10 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 							disabled={isSending || isTyping}
 						/>
 						{hasActiveWorkers && <ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />}
+						{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
+							<ChannelExecutionPanel execution={execution} isTyping={isTyping} />
+						)}
 					</div>
-
-					{execution && (execution.calls.length > 0 || execution.currentTool || isTyping) && (
-						<ChannelExecutionPanel execution={execution} isTyping={isTyping} />
-					)}
 
 					{timeline.length === 0 && !isTyping && (
 						<div className="flex flex-col items-center justify-center py-24">
