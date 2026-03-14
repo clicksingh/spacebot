@@ -819,8 +819,6 @@ impl Channel {
             message.metadata.clone()
         };
 
-        self.complete_active_channel_run_if_any();
-
         self.state.conversation_logger.log_user_message(
             &self.state.channel_id,
             sender_name,
@@ -2792,6 +2790,7 @@ impl Channel {
                 } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
+                    self.complete_active_channel_run_if_any();
                     #[cfg(feature = "metrics")]
                     metrics
                         .messages_sent_total
@@ -2927,6 +2926,7 @@ impl Channel {
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
+                    self.complete_active_channel_run_if_any();
                     #[cfg(feature = "metrics")]
                     metrics
                         .messages_sent_total
