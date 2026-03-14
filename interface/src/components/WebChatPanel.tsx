@@ -113,10 +113,12 @@ function ChannelExecutionPanel({
 			{expanded && (
 				<>
 					{showLive && <ThinkingIndicator />}
-					<div className="mt-2 flex flex-col gap-1.5">
+					<div className="mt-2 max-h-[55vh] overflow-y-auto pr-1 sm:max-h-[60vh]">
+						<div className="flex flex-col gap-1.5">
 						{pairs.map((pair) => (
 							<ToolCall key={pair.id} pair={pair} />
 						))}
+						</div>
 					</div>
 				</>
 			)}

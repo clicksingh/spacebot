@@ -291,10 +291,12 @@ function ChannelExecutionCard({ execution, isTyping }: { execution: ActiveChanne
 							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
 						</div>
 					)}
-					<div className="mt-2 flex flex-col gap-1.5">
-						{pairs.map((pair) => (
-							<ToolCall key={pair.id} pair={pair} />
-						))}
+					<div className="mt-2 max-h-[55vh] overflow-y-auto pr-1 sm:max-h-[60vh]">
+						<div className="flex flex-col gap-1.5">
+							{pairs.map((pair) => (
+								<ToolCall key={pair.id} pair={pair} />
+							))}
+						</div>
 					</div>
 				</>
 			)}
