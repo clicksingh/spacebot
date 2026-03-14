@@ -31,7 +31,7 @@ use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 
@@ -460,6 +460,8 @@ pub struct Channel {
     emergency_override_mode: bool,
     /// Session-scoped override used when persistence is unavailable/failed.
     emergency_override_session_override: Option<bool>,
+    /// Active persisted direct channel run ID (if a direct tool execution is in progress).
+    active_channel_run_id: Mutex<Option<String>>,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
 }
@@ -601,6 +603,7 @@ impl Channel {
             listen_only_session_override: None,
             emergency_override_mode: resolved_emergency_override_mode,
             emergency_override_session_override: None,
+            active_channel_run_id: Mutex::new(None),
             control_handle,
         };
 
@@ -816,6 +819,8 @@ impl Channel {
             message.metadata.clone()
         };
 
+        self.complete_active_channel_run_if_any();
+
         self.state.conversation_logger.log_user_message(
             &self.state.channel_id,
             sender_name,
@@ -907,6 +912,7 @@ impl Channel {
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
         match self.send_routed(OutboundResponse::Text(text.clone())).await {
             Ok(()) => {
+                self.complete_active_channel_run_if_any();
                 #[cfg(feature = "metrics")]
                 {
                     let channel_type = self.current_adapter().unwrap_or("unknown");
@@ -932,6 +938,41 @@ impl Channel {
                 }
                 tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
             }
+        }
+    }
+
+    fn ensure_active_channel_run_id(&self, run_logger: &ProcessRunLogger) -> String {
+        let mut guard = match self.active_channel_run_id.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned; recovering");
+                error.into_inner()
+            }
+        };
+
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+
+        let run_id = format!("ch-run-{}", uuid::Uuid::new_v4());
+        run_logger.log_channel_run_started(&self.id, &run_id);
+        *guard = Some(run_id.clone());
+        run_id
+    }
+
+    fn complete_active_channel_run_if_any(&self) {
+        let run_id = match self.active_channel_run_id.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(error) => {
+                tracing::warn!(%error, channel_id = %self.id, "active_channel_run_id lock poisoned during completion; recovering");
+                error.into_inner().take()
+            }
+        };
+
+        if let Some(run_id) = run_id {
+            self.state
+                .process_run_logger
+                .log_channel_run_completed(&run_id);
         }
     }
 
@@ -2336,7 +2377,8 @@ impl Channel {
         if self.emergency_override_mode {
             "EMERGENCY OVERRIDE MODE: ON\n\nExecution posture:\n- You are in hybrid override mode. You may execute directly with channel tools for speed/reliability, and you may still delegate to branch/worker when the user asks or delegation is clearly better.\n- If the user explicitly asks to use a worker/branch, comply unless tooling is unavailable.\n- If delegation fails, fall back to direct channel execution and continue.\n\nTooling and safety:\n- Elevated channel tools may be mounted (memory/task/docs/shell/file plus optional browser/web/mcp/secrets when configured). Confirm tool availability from the active tool list before planning.\n- Override is not a sandbox/permission bypass. Follow normal safety and redaction rules.\n- Use /override status for mode check and /override off to return to baseline behavior.".to_string()
         } else {
-            "EMERGENCY OVERRIDE MODE: OFF\n- Use normal channel routing and delegation behavior.".to_string()
+            "EMERGENCY OVERRIDE MODE: OFF\n- Use normal channel routing and delegation behavior."
+                .to_string()
         }
     }
 
@@ -2625,6 +2667,7 @@ impl Channel {
     async fn send_outbound_text(&self, text: String, error_context: &str) {
         match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
+                self.complete_active_channel_run_if_any();
                 #[cfg(feature = "metrics")]
                 {
                     let channel_type = self.current_adapter().unwrap_or("unknown");
@@ -3081,6 +3124,32 @@ impl Channel {
                     worker_id = %worker_id,
                     "interactive worker result queued for retrigger"
                 );
+            }
+            ProcessEvent::ToolStarted {
+                process_id,
+                tool_name,
+                args,
+                ..
+            } => {
+                if let ProcessId::Channel(process_channel_id) = process_id {
+                    if process_channel_id == &self.id {
+                        let run_id = self.ensure_active_channel_run_id(run_logger);
+                        run_logger.log_channel_tool_started(&run_id, tool_name, args);
+                    }
+                }
+            }
+            ProcessEvent::ToolCompleted {
+                process_id,
+                tool_name,
+                result,
+                ..
+            } => {
+                if let ProcessId::Channel(process_channel_id) = process_id {
+                    if process_channel_id == &self.id {
+                        let run_id = self.ensure_active_channel_run_id(run_logger);
+                        run_logger.log_channel_tool_completed(&run_id, tool_name, result);
+                    }
+                }
             }
             _ => {}
         }

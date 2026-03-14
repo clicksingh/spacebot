@@ -116,6 +116,7 @@ function itemTimestamp(item: TimelineItem): string {
 		case "message": return item.created_at;
 		case "branch_run": return item.started_at;
 		case "worker_run": return item.started_at;
+		case "channel_run": return item.started_at;
 	}
 }
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
+import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineChannelRun, type TimelineWorkerRun } from "@/api/client";
 import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type ActiveBranch, type ActiveChannelExecution } from "@/hooks/useChannelLiveState";
 import { useIsMobile } from "@/hooks/useViewport";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
@@ -317,6 +317,34 @@ function ChannelExecutionCard({ execution, isTyping, channelId }: { execution: A
 	);
 }
 
+function PersistedChannelRunItem({ item, channelId }: { item: TimelineChannelRun; channelId: string }) {
+	const execution: ActiveChannelExecution = {
+		id: item.id,
+		startedAt: new Date(item.started_at).getTime(),
+		completedAt: item.completed_at ? new Date(item.completed_at).getTime() : null,
+		currentTool: null,
+		toolCalls: item.tool_calls_count,
+		calls: item.tool_calls.map((call) => ({
+			id: call.id,
+			name: call.name,
+			args: call.args,
+			result: call.result,
+			status: call.status === "running" ? "running" : "completed",
+		})),
+	};
+
+	return (
+		<div className="flex gap-3 px-3 py-2">
+			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
+				{formatTimestamp(new Date(item.started_at).getTime())}
+			</span>
+			<div className="min-w-0 flex-1">
+				<ChannelExecutionCard execution={execution} isTyping={false} channelId={channelId} />
+			</div>
+		</div>
+	);
+}
+
 function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
@@ -357,6 +385,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: 
 			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
 			return <WorkerRunItem item={item} agentId={agentId} />;
 		}
+		case "channel_run":
+			return <PersistedChannelRunItem item={item} channelId={channelId} />;
 	}
 }
 

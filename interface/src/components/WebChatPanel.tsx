@@ -9,7 +9,7 @@ import {
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair} from "@/components/ToolCall";
-import {type TimelineBranchRun, type TimelineItem, type TimelineWorkerRun} from "@/api/client";
+import {type TimelineBranchRun, type TimelineChannelRun, type TimelineItem, type TimelineWorkerRun} from "@/api/client";
 
 interface WebChatPanelProps {
 	agentId: string;
@@ -201,6 +201,45 @@ function WorkerTimelineItem({item, agentId}: {item: TimelineWorkerRun; agentId: 
 				<div className={`mt-2 rounded-md border px-3 py-2 ${oc ? "border-zinc-500/20 bg-zinc-500/5" : "border-amber-500/20 bg-amber-500/5"}`}>
 					<div className="text-sm text-ink-dull">
 						<Markdown className="whitespace-pre-wrap break-words">{item.result}</Markdown>
+					</div>
+				</div>
+			)}
+		</div>
+	);
+}
+
+function ChannelRunTimelineItem({item}: {item: TimelineChannelRun}) {
+	const [expanded, setExpanded] = useState(false);
+	const pairs: ToolCallPair[] = item.tool_calls.map((call) => ({
+		id: call.id,
+		name: call.name,
+		argsRaw: call.args,
+		args: tryParseJson(call.args),
+		resultRaw: call.result ?? "",
+		result: call.result ? tryParseJson(call.result) : null,
+		status: call.status === "running" ? "running" : "completed",
+	}));
+
+	return (
+		<div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3 py-2">
+			<button
+				type="button"
+				onClick={() => setExpanded((value) => !value)}
+				className="flex w-full min-w-0 items-center gap-2 text-left text-tiny text-emerald-200"
+			>
+				<div className="h-1.5 w-1.5 rounded-full bg-emerald-400/80" />
+				<span>Direct channel execution</span>
+				{item.tool_calls_count > 0 && (
+					<span className="text-emerald-300/75">{item.tool_calls_count} tool calls</span>
+				)}
+				<span className="ml-auto text-ink-faint">{expanded ? "▾" : "▸"}</span>
+			</button>
+			{expanded && (
+				<div className="mt-2 max-h-[55vh] overflow-y-auto pr-1 sm:max-h-[60vh]">
+					<div className="flex flex-col gap-1.5">
+						{pairs.map((pair) => (
+							<ToolCall key={pair.id} pair={pair} />
+						))}
 					</div>
 				</div>
 			)}
@@ -465,6 +504,9 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 						}
 						if (item.type === "worker_run") {
 							return <WorkerTimelineItem key={`worker-${item.id}`} item={item} agentId={agentId} />;
+						}
+						if (item.type === "channel_run") {
+							return <ChannelRunTimelineItem key={`channel-run-${item.id}`} item={item} />;
 						}
 						return (
 							<div key={item.id}>

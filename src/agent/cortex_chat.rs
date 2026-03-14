@@ -872,6 +872,16 @@ impl CortexChatSession {
                                 transcript.push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
                             }
                         }
+                        crate::conversation::history::TimelineItem::ChannelRun {
+                            tool_calls_count,
+                            ..
+                        } => {
+                            if *tool_calls_count > 0 {
+                                transcript.push_str(&format!(
+                                    "*[Direct channel execution]*: {tool_calls_count} tool calls\n\n"
+                                ));
+                            }
+                        }
                     }
                 }
                 Some(transcript)
